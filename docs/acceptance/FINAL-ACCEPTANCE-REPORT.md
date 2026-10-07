@@ -1,10 +1,44 @@
 # EBTTO FINAL ACCEPTANCE REPORT
 
-**Project:** hermes-experience-tool-optimizer (EBTTO)  
-**Version:** 0.1.0  
-**Hermes Version:** 0.21.5 (git HEAD 2943ee6f19)  
-**Date:** 2026-10-08  
-**Audit:** 21 integration gates, 0 failures, 0 greenwashing
+**Project:** hermes-experience-tool-optimizer (EBTTO)
+**Version:** 0.1.0
+**Hermes Version:** 0.21.5 (git HEAD 2943ee6f19)
+**Date:** 2026-10-08
+**Audit status:** STALE — superseded by live evidence. See `docs/acceptance/BASELINE-AUDIT.md` (Phase 0).
+
+---
+
+## MatuRE-REALITY status (post Phase-3 fix, pre-commit)
+
+After forensic baseline (Phase 0) and the two verified fixes below, the true state is:
+
+| Scope | Verified result |
+|---|---|
+| Git / source tree | Initialized, branch `main`, 30 tracked + 4 new files (needs baseline commit) |
+| Python packaging | `pyproject.toml` ✓
+| pytest 9 compatibility | `pyproject.toml` [tool.pytest.ini] → `ini_options` + `pythonpath=["src"]` |
+| Unit tests | **11 passed** (`python -m pytest tests/unit -q`) |
+| Git security | No secrets, no `.env`, no `C:\Users\ENVY\` in tracked files |
+| .gitignore | 130-line comprehensive |
+| codegraph | Not installed (Phase 33) |
+
+## Gates still missing full live evidence
+
+| Gate | Procedure |
+|---|---|
+| REAL HERMES PLUGIN LOAD / live pre/post_tool_call | Start actual `hermes` runtime (Phase 12–15) |
+| Real trajectory capture | Live run (Phase 16) |
+| Learning loop / behavioral improvement | Benchmark (Phase 26–27) |
+| Codegraph baseline + forensic | Install + `codegraph init`/`graph` (Phase 33) |
+| Full pytest suite | All four suites (Phase 38) |
+| Build + clean external install | `python -m build` + pip wheel install (Phase 40–41) |
+| Public publication + release | GitHub + tag (Phase 54–55) |
+
+---
+
+*Report generated 2026-10-08. Evidence-first; prior claims were verified against live source and discarded where they conflicted.*
+
+---
 
 ---
 

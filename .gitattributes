@@ -1,0 +1,41 @@
+# .gitattributes
+# Cross-platform development attributes
+
+# Text files: LF line endings, normalized on commit (Windows checkout keeps CRLF)
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.sh text eol=lf
+
+# Assets: binary, never normalize
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.woff binary
+*.woff2 binary
+*.eot binary
+*.ttf binary
+
+# Source
+*.pyc text=CRLF
+__pycache__/ binary
+*.py[cod] binary
+
+# Git LFS not used
+*.db filter=lfs diff=lfs merge=lfs -text
+
+# End of file markers
+* text=auto

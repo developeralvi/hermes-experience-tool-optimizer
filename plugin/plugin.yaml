@@ -1,0 +1,4 @@
+name: hermes-ebtto
+version: 0.1.0
+description: Experience-Based Tool Trajectory Optimization for Hermes Agent
+main: hermes_ebtto
