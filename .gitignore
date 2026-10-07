@@ -128,3 +128,7 @@ dmypy.json
 
 # Pyright
 pyrightconfig.json
+
+# CodeGraph runtime
+.codegraph/
+codegraph.db
