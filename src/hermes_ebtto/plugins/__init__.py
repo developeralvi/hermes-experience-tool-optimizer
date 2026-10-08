@@ -306,7 +306,6 @@ class EBTTOPlugin:
                         result="SUCCESS" if success else "FAILURE",
                         confidence=0.90,
                         evidence={"result": result_str[:500], "tool": tool_name, "status": status},
-                        recorded_at=datetime.now(timezone.utc).isoformat(),
                     )
                     self.store.record_outcome(outcome)
 
