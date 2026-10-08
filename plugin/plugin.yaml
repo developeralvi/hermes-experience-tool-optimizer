@@ -2,3 +2,9 @@ name: hermes-ebtto
 version: 0.1.0
 description: Experience-Based Tool Trajectory Optimization for Hermes Agent
 main: hermes_ebtto.plugins
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - on_session_start
+  - on_session_end

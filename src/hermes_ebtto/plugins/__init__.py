@@ -16,8 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-# hermes_ebtto config import
-from hermes_ebtto import config as ebtto_config
+# hermes_ebtto config import (relative — works whether the package is installed
+# as ``hermes_ebtto`` or loaded standalone by the Hermes capability probe,
+# which names the module ``hermes_validate_probe_plugin``).
+from .. import config as ebtto_config
 
 log = logging.getLogger(__name__)
 
