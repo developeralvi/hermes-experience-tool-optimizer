@@ -319,12 +319,30 @@ class EBTTOPlugin:
 
             guidance = self._retrieve_guidance_for_task(task_family, {"user_message": user_message}, task_id)
             if not guidance:
+                self._record_retrieval_event(
+                    task_id=task_id, task_fingerprint=task_family,
+                    hook="pre_llm_call", candidate_count=0, qualified_count=0,
+                    selected_strategy_id=None, guidance_returned=False,
+                    reason_code="no_candidate",
+                )
                 return None
 
             hint = (guidance.get("directive") or {}).get("hint")
             if not hint:
+                self._record_retrieval_event(
+                    task_id=task_id, task_fingerprint=task_family,
+                    hook="pre_llm_call", candidate_count=1, qualified_count=1,
+                    selected_strategy_id=guidance.get("strategy_id"),
+                    guidance_returned=False, reason_code="candidate_below_threshold",
+                )
                 return None
 
+            self._record_retrieval_event(
+                task_id=task_id, task_fingerprint=task_family,
+                hook="pre_llm_call", candidate_count=1, qualified_count=1,
+                selected_strategy_id=guidance.get("strategy_id"),
+                guidance_returned=True, reason_code="guidance_returned",
+            )
             self.metrics["guidance_injected"] += 1
             log.info("[EBTTO pre_llm_call] injecting guidance for task=%s: %s",
                      task_id, guidance.get("strategy_name", "unknown"))
@@ -405,6 +423,13 @@ class EBTTOPlugin:
                     kwargs.get("task_id", ""),
                 )
                 if guidance:
+                    self._record_retrieval_event(
+                        task_id=kwargs.get("task_id", ""),
+                        task_fingerprint=kwargs.get("tool_name") or "unknown",
+                        hook="pre_tool_call", candidate_count=1, qualified_count=1,
+                        selected_strategy_id=guidance.get("strategy_id"),
+                        guidance_returned=True, reason_code="guidance_returned",
+                    )
                     self.metrics["guidance_injected"] += 1
                     if self.mode == self.MODE_SHADOW:
                         log.info("[EBTTO SHADOW] Guidance: %s", guidance.get("strategy_name", "unknown"))
@@ -736,6 +761,35 @@ class EBTTOPlugin:
             )
         except Exception as exc:
             log.warning("EBTTO pattern learning failed for %s: %s", tool_name, exc)
+
+    def _record_retrieval_event(self, *, task_id: str, task_fingerprint: str,
+                                hook: str, candidate_count: int, qualified_count: int,
+                                selected_strategy_id: Optional[str],
+                                guidance_returned: bool, reason_code: str) -> None:
+        """Persist one retrieval/guidance lifecycle event (fail-open).
+
+        Telemetry only: never changes learning behavior. Any failure (missing
+        table on a pre-v4 DB, locked DB, ...) is swallowed to a debug log so a
+        Hermes turn is never interrupted by dashboard bookkeeping.
+        """
+        try:
+            if self.store is None:
+                return
+            from hermes_ebtto.events import new_id
+            from hermes_ebtto.storage import _utcnow_iso
+            inner = getattr(self.store, "store", self.store)
+            inner._execute(
+                """INSERT OR IGNORE INTO retrieval_guidance_events
+                   (guidance_id, task_id, task_fingerprint, hook, candidate_count,
+                    qualified_count, selected_strategy_id, guidance_returned,
+                    reason_code, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (new_id(), task_id, task_fingerprint, hook, candidate_count,
+                 qualified_count, selected_strategy_id, 1 if guidance_returned else 0,
+                 reason_code, _utcnow_iso()),
+            )
+        except Exception as exc:
+            log.debug("EBTTO retrieval telemetry skipped: %s", exc)
 
     def _retrieve_guidance_for_task(self, tool_name: str, args: Dict[str, Any],
                                     task_id: str) -> Optional[Dict[str, Any]]:

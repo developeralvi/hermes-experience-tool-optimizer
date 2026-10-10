@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EBTTO Dashboard</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header>
+  <h1>EBTTO</h1>
+  <nav id="nav" role="tablist" aria-label="Dashboard pages">
+    <button data-page="overview">Overview</button>
+    <button data-page="activity">Activity</button>
+    <button data-page="tools">Tool Calls</button>
+    <button data-page="failures">Failures</button>
+    <button data-page="tasks">Trajectories</button>
+    <button data-page="memory">Memory</button>
+    <button data-page="guidance">Guidance</button>
+    <button data-page="system">System</button>
+  </nav>
+  <div id="status" aria-live="polite">
+    <span id="conn" class="dot" title="connection"></span>
+    <span id="last-refresh">never</span>
+    <label>refresh
+      <select id="interval">
+        <option value="0">off</option>
+        <option value="5000" selected>5s</option>
+        <option value="15000">15s</option>
+        <option value="60000">60s</option>
+      </select>
+    </label>
+    <button class="act" id="refresh-now">Refresh</button>
+  </div>
+</header>
+<main id="view" aria-live="polite">loading…</main>
+<script src="/app.js"></script>
+</body>
+</html>

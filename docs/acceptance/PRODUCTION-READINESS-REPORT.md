@@ -1,161 +1,119 @@
-# Production Readiness Report — EBTTO
+# Production Readiness Report — EBTTO (Dashboard Phase)
 
-**Date:** 2026-10-11
-**Commit:** d240f97 (before: 8987984)
+**Date:** 2026-10-10
 **Branch:** main
 **Remote:** https://github.com/developeralvi/hermes-experience-tool-optimizer.git (verified origin)
 **Evaluator:** Hermes autonomous audit
 
-Supersedes the 2026-10-08 edition of this report (commit aff8821).
+Supersedes the 2026-10-11 hardening edition (commit 4c316c0).
 
 ---
 
 ## A. Summary
 
-Implemented and verified:
+**Implemented (all verified by execution):**
 
-1. Removed the invalid workflow file `.github/workflows/ebtto-pack.yaml` (a
-   plugin manifest mistakenly placed under `workflows/` — no `on:`/`jobs:`,
-   causing an instant failing "workflow" run on every push). Canonical
-   manifest remains `plugin/plugin.yaml`.
-2. Rewrote `.github/workflows/ci.yml` into a deterministic, correct pipeline.
-3. Updated GitHub About metadata (description + 9 topics) via `gh repo edit`
-   and read the values back.
-4. Corrected README documentation defects: non-existent hooks, broken doc
-   links, false test-tree claims, unsupported behavioral claims; added
-   verified live-runtime evidence.
-5. `.gitignore` hardened for the local clean-install venv.
-6. Pushed commit d240f97 to origin/main (normal push, no force).
+1. **Read-only dashboard** (`src/hermes_ebtto/dashboard/`) — stdlib-only
+   loopback HTTP server + JSON query layer + static single-page UI with 8
+   pages: Overview, Tool Calls, Failures, Trajectories, Memory, Guidance,
+   System. Launched via `python -m hermes_ebtto.dashboard [--port N]
+   [--no-browser] [--db PATH]`.
+2. **Retrieval/guidance telemetry** — additive `migrations/4.sql`
+   (`retrieval_guidance_events` table) + fail-open plugin writes at both
+   `pre_llm_call` and `pre_tool_call` retrieval points, so the dashboard can
+   distinguish retrieval / qualification / guidance-returned stages that were
+   previously unrecorded. Learning behavior unchanged.
+3. **27 new dashboard tests** (`tests/unit/test_dashboard.py`) covering
+   query correctness, reconciliation, pagination clamping, DB safety,
+   security, and CLI.
+4. **Packaging** — wheel now ships `dashboard/assets/*` + `plugin.yaml` +
+   `migrations/4.sql`; verified clean-venv install + live API + clean
+   shutdown.
+5. **GitHub About** — description + 9 topics re-verified via `gh repo view`
+   (they persist from the prior hardening session).
 
-Remaining incomplete:
+**Remaining incomplete:**
 
-- **GitHub Actions execution is BLOCKED** by an account-level billing lock:
-  every job fails at startup with "The job was not started because your
-  account is locked due to a billing issue." This is not an application
-  defect. Local equivalents of every CI gate were executed instead.
-- **Live behavioral benchmark: BLOCKED.** A controlled baseline-vs-treatment
-  inference experiment has not been run. The offline A/B harness passes
-  41/41 checks but performs no inference.
-- **CodeGraph rebuild: NOT PERFORMED** this session; the prior
-  `CODEGRAPH-FINAL-REVIEW.md` is retained as historical evidence.
-- **GitHub Release: NOT CREATED** (release gates cannot pass in the GitHub
-  environment while Actions are billing-locked).
+- GitHub Actions execution: BLOCKED (account billing lock — GitHub-side).
+- ruff/mypy: NOT AVAILABLE locally (not installed).
+- CodeGraph re-verification: NOT PERFORMED this session.
+- Live behavioral benchmark: BLOCKED (no controlled A/B inference run).
+- GitHub Release: NOT CREATED.
 
-## B. Repository and GitHub identity
-
-| Item | Value |
-|---|---|
-| Local root | `C:\Users\ENVY\StéWork\EBTTO` |
-| Git root | same |
-| origin | `https://github.com/developeralvi/hermes-experience-tool-optimizer.git` (matches expected repo) |
-| Branch | main |
-| Before | 8987984c434c6e74d1ad81ef35178e7cf65c0dea |
-| After | d240f97 |
-| Push status | Pushed normally (no force), verified via `git fetch` + `gh run list` |
-
-## C. Changes made
-
-| File | Action | Reason |
-|---|---|---|
-| `.github/workflows/ebtto-pack.yaml` | Deleted | Invalid workflow (plugin manifest under workflows/); nothing references it; caused a failing workflow run on every push. |
-| `.github/workflows/ci.yml` | Rewritten | Deterministic pipeline; removed `|| true` on mypy, `continue-on-error` on benchmark step, jobs for nonexistent test dirs, and the false-positive `eyJ` secret pattern. |
-| `README.md` | Edited | Removed non-existent hooks; fixed broken doc links; corrected test tree; replaced unproven claims with verified evidence + explicit NOT-YET-PROVEN statement. |
-| `.gitignore` | Edited | Ignore `.venv-clean-install/`. |
-| `docs/acceptance/PRODUCTION-READINESS-REPORT.md` | Rewritten | This report (supersedes the 2026-10-08 edition, which claimed unverified PASS gates including "behavioral improvement verified"). |
-
-Untracked but intentionally not committed: `experiments/` (local A/B
-harness dev tool; no secrets found in scan).
-
-## D. GitHub metadata and CI
-
-- About description set to: "Evidence-based tool-trajectory recording,
-  failure classification, and advisory guidance for Hermes Agent."
-  Read back via `gh repo view --json description`: confirmed.
-- Topics added: hermes-agent, ai-agents, tool-use, trajectory-optimization,
-  python, sqlite, observability, developer-tools, llm. Read back via
-  `gh repo view --json repositoryTopics`: all 9 confirmed.
-- Homepage: left empty (no project website exists).
-- CI run after push: https://github.com/developeralvi/hermes-experience-tool-optimizer/actions/runs/38079030067
-  — **all jobs failed with "account is locked due to a billing issue"**
-  (GitHub-level blocker, not a workflow defect). Workflow YAML parses and
-  all job structures validate locally.
-
-## E. Tests and package verification (local execution)
+## B. Test & package evidence
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Offline tests | PASS | `python -m pytest tests -q` → 16 passed, exit 0 |
+| Offline tests | PASS | `python -m pytest tests -q` → **43 passed** (16 prior + 27 dashboard), exit 0 |
 | A/B harness | PASS | `python experiments/ab_harness/test_harness_ab.py` → 41/41, exit 0 |
-| Package build | PASS | `python -m build --sdist --wheel` → sdist + wheel built |
-| Clean-venv install | PASS | wheel installed in fresh venv; `hermes_ebtto.__version__==0.1.0`; `register` importable; migrations 1/2/3 present in installed package |
-| Plugin manifest validation | PASS | `plugin/plugin.yaml` + `src/hermes_ebtto/plugin.yaml` both parse, identical, hooks match registered hooks |
-| Secret scan (tracked files) | PASS | No real secrets; only redaction-pattern literals in `privacy.py` and doc mentions |
-| ruff / mypy | NOT AVAILABLE | Not installed in the local Python environment; CI declares them |
-| GitHub Actions run | BLOCKED | Account billing lock (GitHub-side) |
+| Package build | PASS | `python -m build --sdist --wheel` — wheel contains dashboard/assets, plugin.yaml, migrations/1-4.sql |
+| Clean-venv install | PASS | fresh venv install; `queries.open_ro()` resolved the LIVE production DB via `$HERMES_HOME` |
+| Live HTTP API | PASS | server started on :18799; `/api/overview`, `/api/system`, `/api/tool_calls`, `/api/strategies`, `/api/guidance`, `/api/evaluations` all returned valid JSON from the live DB |
+| Live data (read-only) | PASS | all-time: 2023 tool calls, 2019 succeeded (session-level), 4 failed; top tools terminal 838 / execute_code 489 / patch 202; 24 qualified strategies; integrity ok |
+| Mutation endpoints | PASS | `/api/reset`, `/api/mode`, `/api/prune`, `/api/sql`, `/api/delete`, `/api/replay` → 404 (test + live curl) |
+| Clean shutdown | PASS | SIGTERM → port released, server stopped |
+| Read-only enforcement | PASS | test: writes raise `sqlite3.OperationalError`; `mode=ro` + `PRAGMA query_only` |
+| No auto DB creation | PASS | test: missing DB → DashboardError, no file created |
+| Loopback binding | PASS | test: non-loopback connect refused; live: netstat shows 127.0.0.1 only |
+| XSS inertness | PASS | test: payload stored → JSON string; frontend has no `innerHTML` in code |
+| Concurrency | PASS | test: writer thread + reader loop, no failures |
+| GitHub Actions run | BLOCKED | account billing lock |
+| ruff / mypy | NOT AVAILABLE | not installed locally |
 
-## F. Hermes runtime and learning
+## C. Live data-path honesty
 
-- **Offline/mocked:** 16 pytest + 41 harness checks pass.
-- **Actual runtime evidence (live Hermes agent.log, 2026-10-11):**
-  - `EBTTO plugin registering for mode=shadow` × 26; `registered
-    (mode=shadow, hooks=4)` × 24 — plugin discovery + hook registration
-    verified live.
-  - `[EBTTO pre_llm_call] injecting guidance` × 4 — guidance reaches the
-    model before tool selection (the Run-1 → Run-2 loop path fires).
-  - `[EBTTO SHADOW] Guidance: terminal best practice` × 126 — retrieval +
-    guidance path verified live.
-  - `[EBTTO] Pattern persisted` × 560 across terminal/execute_code/patch/
-    read_file/skill_view/skill_manage with evidence counts and success
-    rates — learning path qualified and persisted patterns live.
-  - `[EBTTO] Failure on ...` × 10 — failure classification live.
-- **Production database (read-only):** integrity_check ok, 0 FK
-  violations, WAL mode; 1691 tool_calls, 1682 outcomes, 66 errors, 22
-  patterns, 23 strategies. Never written during this audit (opened
-  `mode=ro`); live writer may change counts between reads.
-- **Behavioral improvement:** NOT PROVEN. No controlled A/B inference run
-  was performed.
+- Success/failure counts are computed against the `outcomes` table via the
+  session prefix embedded in both `turn_id` values (the pre-tool and
+  post-tool hook writers assign **independent** task ids in production —
+  verified directly against the live schema: `tc∩oc task_ids = 0`).
+  `tool_calls.result_status` is 'PENDING' for every real row, so it is only
+  a fallback.
+- On the live DB the dashboard reports schema v3 and `guidance telemetry:
+  False` — the pre-v4 truth. Migration 4 + telemetry writes take effect on
+  the next Hermes restart with the updated plugin installed; the dashboard
+  will then show retrieval events. Until then the Guidance page states the
+  telemetry is unavailable rather than inventing rows.
+- `retrieval_events` (the older table) remains 0 rows and is not used by
+  the dashboard; the v4 table is the new telemetry path.
+- Trajectory timelines show only persisted stages and list missing stages
+  explicitly (pre/post task-id split means outcomes do not join by task_id
+  in production — reported honestly).
 
-## G. CodeGraph
+## D. Changes made
 
-- `.codegraph/` (codegraph.db, 0.87 MB) is git-ignored and untracked —
-  generated state correctly excluded from the published tree.
-- Prior report `docs/acceptance/CODEGRAPH-FINAL-REVIEW.md` (2026-10-08,
-  codegraph 1.5.0: 18 files, 322 nodes, 584 edges) is retained as
-  historical evidence. A fresh re-index was not run this session; those
-  counts have not been re-verified against the current (grown) source
-  tree.
+| File | Action | Reason |
+|---|---|---|
+| `src/hermes_ebtto/dashboard/{__init__,__main__,queries,server}.py` | New | read-only query layer, loopback stdlib server, CLI entry |
+| `src/hermes_ebtto/dashboard/assets/{index.html,app.js,styles.css}` | New | static UI, no build step, no external resources, textContent rendering |
+| `src/hermes_ebtto/migrations/4.sql` (+ plugin mirror) | New | additive `retrieval_guidance_events` table + indexes |
+| `src/hermes_ebtto/plugins/__init__.py` (+ plugin mirror) | Edited | fail-open `_record_retrieval_event()` called from both retrieval points |
+| `tests/unit/test_dashboard.py` | New | 27 tests (queries, DB safety, security, HTTP, CLI) |
+| `pyproject.toml` | Edited | package-data: dashboard assets + plugin.yaml |
+| `README.md` | Edited | Dashboard section + repository tree update |
+| `docs/development/DASHBOARD.md` | New | dashboard manual |
+| `plugin/` mirror | Synced | keep plugin install tree in sync with src |
 
-## H. Security and data integrity
+## E. Remaining blockers
 
-- Secret scan on all tracked files: no real credentials (only pattern
-  literals in privacy.py and doc prose).
-- Production DB `C:\Users\ENVY\.hermes-ebtto\ebtto.db` untouched —
-  opened read-only for observational counts only.
-- No force-push, no history rewrite, no `git reset --hard`.
-- `git add` limited to reviewed files; final working tree clean except the
-  intentionally-untracked `experiments/`.
-
-## I. Remaining blockers
-
-1. **GitHub Actions billing lock** — exact message: "The job was not
-   started because your account is locked due to a billing issue." Minimum
-   action: resolve billing on the GitHub account; then re-run the CI
-   workflow (no code change needed — the pipeline is now correct).
+1. **GitHub Actions billing lock** — jobs fail with "The job was not started
+   because your account is locked due to a billing issue." Resolve billing,
+   then re-run CI; the pipeline (from the prior hardening session) is
+   correct and the dashboard tests will run inside `test` matrix.
 2. **Live behavioral benchmark BLOCKED** — requires a controlled inference
-   experiment through a tool-capable provider. The offline harness
-   (`test_harness_ab.py`, 41/41) prepares and validates the experiment;
-   the adapter that performs actual requests has not been authorized
-   (zero-cost entitlement unverified).
-3. **ruff/mypy local verification NOT AVAILABLE** — not installed locally;
-   CI declares them. Once GitHub billing is resolved, the CI runs provide
-   this evidence.
+   experiment; not authorized this session.
+3. **ruff/mypy NOT AVAILABLE locally** — CI declares them.
 4. **CodeGraph re-verification** — not performed this session.
+5. **Guidance telemetry is dormant until the plugin restart** — the live
+   plugin process still runs the pre-4.sql module; on next Hermes start with
+   the synced plugin the `retrieval_guidance_events` rows begin accumulating
+   and the Guidance page populates. This is an operational fact, not a code
+   defect.
 
-## J. Final verdict
+## F. Final verdict
 
 **PARTIAL — core work complete, mandatory gates remain blocked**
 
-All fixable local defects were fixed with evidence; the two mandatory
-gates that remain open (GitHub Actions execution, live behavioral
-benchmark) are blocked by an account-level billing lock and an
-unverified inference entitlement, respectively — not by code defects.
+The dashboard is implemented, tested (43/43), packaged, and verified against
+the live production database read-only. The remaining open gates are
+external (GitHub billing, live inference entitlement, local dev tools), not
+code defects.

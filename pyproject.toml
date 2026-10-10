@@ -32,7 +32,11 @@ where = ["src"]
 # Migrations are loaded from the INSTALLED package at runtime
 # (storage.py::MIGRATIONS_DIR = Path(__file__).parent / "migrations"), so the .sql
 # files must ship in the wheel or every install silently runs with a v1 schema.
-hermes_ebtto = ["migrations/*.sql"]
+hermes_ebtto = [
+    "migrations/*.sql",
+    "plugin.yaml",
+    "dashboard/assets/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

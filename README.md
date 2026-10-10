@@ -91,13 +91,18 @@ EBTTO/
 │   ├── normalization.py         # Task fingerprinting
 │   ├── observability.py         # Metrics publisher
 │   ├── cli.py                   # 13 CLI commands
-│   └── migrations/1.sql         # SQLite schema
+│   ├── dashboard/               # Read-only web dashboard
+│   │   ├── queries.py           #   read-only query layer
+│   │   ├── server.py            #   loopback HTTP server (stdlib)
+│   │   └── assets/              #   static UI (no build step)
+│   └── migrations/              # SQLite schema + migrations 1-4
 ├── tests/
-│   ├── unit/                    # unit + package tests
+│   ├── unit/                    # unit + package + dashboard tests
 │   └── benchmark/               # baseline vs EBTTO behavioral tests
 ├── docs/
 │   ├── compatibility/           # Hermes runtime contract
 │   ├── configuration/           # Modes, storage, privacy
+│   ├── development/             # Dashboard manual
 │   ├── security/                # Threat model
 │   └── acceptance/              # Forensic audit reports
 ├── .github/workflows/           # CI (test matrix, lint, typecheck, package)
@@ -220,6 +225,24 @@ evidence tiers for each claim: `docs/configuration/MODES.md`.
 All tool arguments and results pass through `privacy.sanitize()` before
 persistence. Redaction patterns include `Authorization: Bearer *****`,
 `xoxb-`, `sk-`, `AKIA*`, `BEGIN PRIVATE KEY`, and more.
+
+## Dashboard
+
+A read-only, loopback-only web dashboard over the same database the plugin
+writes to:
+
+```bash
+python -m hermes_ebtto.dashboard            # http://127.0.0.1:8797/
+python -m hermes_ebtto.dashboard --no-browser
+```
+
+Pages: Overview (metrics + 14-day trend), Tool Calls (filter/search/drill-down
+with sanitized args & errors), Failures (categories + proven recoveries),
+Trajectories (per-task timeline, missing stages stated), Memory (patterns &
+strategies with evidence, confidence, qualification, provenance), Guidance
+(retrieval audit), System (schema/integrity/counts). Binds 127.0.0.1 only;
+`mode=ro` + `query_only`; no mutating endpoints; no external assets; XSS-inert
+rendering. Full documentation: [docs/development/DASHBOARD.md](docs/development/DASHBOARD.md).
 
 ## CLI
 
