@@ -158,11 +158,61 @@ See [Provider Runtime Compatibility](docs/acceptance/PROVIDER-RUNTIME-COMPATIBIL
 
 ## Modes
 
-- **record_only** — Observe and record everything. No guidance, no intervention.
-- **advisory** (default) — Inject compact guidance in `pre_llm_call`. Never
-  modifies or blocks the model's tool choice.
-- **auto** — Auto mode executes safe stored strategies. **Disabled by default.**
-  Must be explicitly toggled per run via the CLI.
+EBTTO modes control what the plugin does at two distinct hook stages. These
+stages are **not** interchangeable:
+
+- **Pre-selection guidance** (`pre_llm_call`) — content handed to the model
+  *before it chooses a tool*. It is appended to the user message (never the
+  system prompt).
+- **Post-selection observation** (`pre_tool_call`) — what happens *around a tool
+  the model has already chosen*. It can log, return a directive, or do nothing.
+
+A mode can be passive at one stage and active at the other. `shadow` is exactly
+that case — see below.
+
+| Mode | `pre_llm_call` behavior | `pre_tool_call` behavior | Verified effect |
+|------|-------------------------|--------------------------|-----------------|
+| `record_only` (default) | Returns `None` immediately. No retrieval, no injection. | Records the tool call, then returns `None`. No guidance retrieved, nothing logged, nothing blocked. | Observes and records only. Cannot influence tool choice. |
+| `shadow` | Retrieves applicable guidance and **returns it as `{"context": ...}`**, which Hermes appends to the user message before tool selection. | Records the call, retrieves guidance, and **logs it** (`[EBTTO SHADOW] Guidance: ...`). **Returns `None`** — the tool call is never modified or blocked. | **Mixed.** May influence tool *selection* via the prompt; never changes or blocks the tool *call* itself. |
+| `advisory` | Same retrieval and injection as `shadow`. | Returns the strategy's `directive` dict (`{"action": "continue", ...}`) so the runtime receives it, without blocking. | May influence selection and surfaces a directive, but does not modify or block. |
+| `guarded` | Same retrieval and injection as `shadow`. | Logs and returns `{"action": "continue", "requires_approval": True, "guidance": ...}`. | Can require approval before execution. |
+| `controlled_auto` | Same retrieval and injection as `shadow`. | Calls `_apply_strategy_to_args()` and returns the result, which may rewrite the tool arguments. | Can modify the tool call's arguments. |
+| `off` | Returns `None`. | Returns `None` before any recording. | Plugin inert. |
+
+Key points:
+
+- **The effective default is `record_only`, not `advisory`.** Mode resolves as
+  `EBTTO_MODE` env var → `plugins.entries.hermes-ebtto.settings.mode` →
+  `record_only`, so a fresh install never injects. Note that
+  `src/hermes_ebtto/config.py` declares `DEFAULTS["mode"] = "shadow"`, but that
+  dict is not read by the plugin's `register(ctx)` path and does not affect
+  runtime behaviour — see `docs/configuration/MODES.md`.
+- **`shadow` is intentionally asymmetric.** It injects learned guidance into the
+  *model's prompt* (pre-selection) but observes only at the *tool call*
+  (post-selection). This is a deliberate design choice, not an inconsistency:
+  influencing what the model is shown is treated as observation, whereas
+  altering or blocking an actual tool execution is treated as intervention.
+  Whether guidance injection is appropriate for a mode named `shadow` is an open
+  design question — see `docs/configuration/MODES.md`.
+- **Guidance presence is not proof of effect.** Guidance appearing in an
+  outbound model request demonstrates only that it was *delivered before tool
+  selection*. It does not prove the model's decision changed. Measuring a real
+  behavioral difference requires a controlled baseline comparison.
+- **Guidance is advisory, not an instruction.** The injected text is explicitly
+  labelled data ("advisory, do not assume it still applies") and tells the model
+  to ignore it if it does not fit the current request.
+- **Guidance is absent when nothing qualifies.** If no strategy passes the
+  qualification thresholds (5+ outcomes, 80%+ success rate, 3+ independent
+  contexts), or the task family resolves to `general` (which has no learned
+  experience), `pre_llm_call` returns nothing and the turn proceeds exactly as
+  it would without EBTTO.
+- **All hooks fail open.** A storage or EBTTO error is logged and returns
+  `None`; the ordinary Hermes tool loop is never broken by EBTTO.
+- **`auto` in the README's earlier wording maps to `controlled_auto`.** It is
+  disabled by default and must be enabled explicitly.
+
+Full implementation detail, including the mode-resolution inconsistency and the
+evidence tiers for each claim: `docs/configuration/MODES.md`.
 
 ## Privacy
 

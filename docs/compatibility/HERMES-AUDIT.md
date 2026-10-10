@@ -28,9 +28,10 @@ All lifecycle hooks fire via `hermes_cli.lifecycle.invoke_hook(hook_name, **kwar
 **Plugin-registered hooks** (`ctx.register_hook("<name>", callback)`), verified in this install:
 
 - `pre_tool_call` — payload: `tool_name, args, task_id, session_id, tool_call_id, turn_id, api_request_id, middleware_trace`. Returns `{"action": "block", "message"}`, `{"action": "modify", "args": {...}}`, or `{"action": "approve", ...}`; or any non-None result is appended to results. Never raises into the loop (isolated per callback). Bounded by `hook_callback_timeout` (30s); `pre_tool_call` is a fail-closed policy hook.
+  - **EBTTO's own use is narrower than this contract.** EBTTO returns `None` (continue) in `record_only`, `shadow`, and `off`, and a non-blocking `{"action": "continue", ...}` directive in `advisory` and `guarded`. It never returns `block`, `modify`, or `approve` for this hook. Per-mode contract: `docs/configuration/MODES.md`.
 - `post_tool_call` — payload: `tool_name, args, result, duration_ms, ...`. Observer; returns ignored / non-None results appended.
 - `transform_tool_result` — payload: `tool_name, args, result, duration_ms, ...`. May return a replacement result string.
-- `pre_llm_call` — payload: injected via `_collect_pre_llm_call_context`; may return `{"context": "..."}` or a str to inject into the user message.
+- `pre_llm_call` — payload: injected via `_collect_pre_llm_call_context`; may return `{"context": "..."}` or a str to inject into the user message. This is the hook EBTTO uses to deliver learned guidance **before tool selection** — the only EBTTO hook that can influence tool *choice*. Pre-selection vs post-selection distinction: `docs/configuration/MODES.md` §1.
 - `post_llm_call` — fired once per turn in `turn_finalizer`.
 - `on_session_start` — payload: `session_id, model, platform, ...`.
 - `on_session_end` — payload: `session_id, completed, interrupted, ...`.
@@ -61,6 +62,8 @@ All lifecycle hooks fire via `hermes_cli.lifecycle.invoke_hook(hook_name, **kwar
 ## 5. Configuration (adapted)
 
 `ebtto: { enabled: true, mode: shadow, ... }` under the Hermes config domain. All keys verified against `hermes_cli/config_defaults.py` as optional, override-able keys.
+
+Valid modes: `off`, `record_only`, `shadow`, `advisory`, `guarded`, `controlled_auto`. The example above shows `shadow` because that was the mode exercised during the original audit; the **effective runtime default is `record_only`**, so a fresh install records without injecting. Note that `src/hermes_ebtto/config.py::DEFAULTS["mode"]` also declares `shadow`, but that dict is not read by the plugin's `register(ctx)` path and does not govern runtime behaviour. Per-mode behaviour and the resolution order are documented in `docs/configuration/MODES.md`.
 
 ## 6. Decision log
 
