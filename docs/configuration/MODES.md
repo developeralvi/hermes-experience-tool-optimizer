@@ -6,31 +6,38 @@ written from the implementation in
 understand behaviour **without reading the code**. Where the implementation and
 any other document disagree, **this document and the source are authoritative**.
 
-Verified against commit `f3ec110`.
+Verified against commit `608fdee`.
 
-Mode names are defined in **three places, which disagree on the default**. This
-is a real inconsistency, documented here rather than silently resolved:
+Mode names are defined in **two places, which agreed on the default after
+commit `7af0f0b`**:
 
 | Location | Role | Default it declares |
 |---|---|---|
 | `plugins/__init__.py` — `EBTTOPlugin.__init__` (`config.get("mode", MODE_RECORD_ONLY)`) | Instance default when constructed directly | `record_only` |
-| `plugins/__init__.py` — `register(ctx)` (`ctx.get_config("mode", "record_only")`, overridable by `EBTTO_MODE`) | **The path Hermes actually uses.** | `record_only` |
-| `config.py` — `DEFAULTS["mode"]` | Standalone-config defaults dict | `shadow` |
+| `plugins/__init__.py` — `register(ctx)` (`ctx.get_config("mode", ebtto_config.DEFAULT_MODE)`, overridable by `EBTTO_MODE`) | **The path Hermes actually uses.** | `record_only` |
+| `config.py` — `DEFAULT_MODE`, referenced by `DEFAULTS["mode"]` | Canonical single source of truth | `record_only` |
 
-**The effective runtime default is `record_only`**, because `register(ctx)` — the
-only path the running Hermes process invokes — never reads `config.py`'s
-`DEFAULTS`. `config.py`'s `shadow` value is therefore a latent inconsistency: it
-is dead for the plugin path, but would surprise anyone importing the config
-module directly.
+**The effective runtime default is `record_only`.** Before commit `7af0f0b`
+these disagreed: `config.py::DEFAULTS["mode"]` declared `shadow` while
+`register(ctx)` fell back to `record_only`, so anyone reading the declared
+default would have expected injection on a fresh install when the runtime
+actually recorded silently. `DEFAULT_MODE` is now the single constant that both
+paths resolve from, and `DEFAULTS["mode"]` derives from it rather than restating
+a literal.
 
 **Mode resolution order** (first hit wins):
 
 1. `EBTTO_MODE` environment variable — profile-independent escape hatch.
 2. `ctx.get_config("mode")` — i.e. `plugins.entries.<id>.settings.mode`.
-3. `"record_only"`.
+3. `config.DEFAULT_MODE` — `record_only`.
 
 Valid mode names (`config.py::VALID_MODES`):
 `off`, `record_only`, `shadow`, `advisory`, `guarded`, `controlled_auto`.
+
+> Note: `config.py`'s `EbttoConfig` / `get_ebtto()` typed loader is **not** used
+> by the live plugin path — `plugins/__init__.py` imports `config` only to read
+> `DEFAULT_MODE`. That loader exists for standalone/embedding use, and now
+> shares the same default.
 
 
 ---

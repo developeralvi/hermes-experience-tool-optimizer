@@ -165,14 +165,17 @@ def register(ctx):
     #      operator can force a mode without editing a profile-scoped config
     #      that the routed profile may not inherit.
     #   2. ctx.get_config("mode") — plugins.entries.<id>.settings.mode.
-    #   3. "record_only" — safe default: a fresh install never injects.
+    #   3. config.DEFAULT_MODE — safe default: a fresh install never injects.
+    #      Resolved from the canonical constant so the declared default and the
+    #      effective fallback cannot drift apart.
     import os as _os
+    _default_mode = getattr(ebtto_config, "DEFAULT_MODE", "record_only")
     mode = _os.environ.get("EBTTO_MODE", "").strip()
     if not mode:
         try:
-            mode = ctx.get_config("mode", "record_only")
+            mode = ctx.get_config("mode", _default_mode)
         except Exception:
-            mode = "record_only"
+            mode = _default_mode
     plugin = EBTTOPlugin(manifest=None, ctx=ctx, config={
         "mode": mode,
         "enabled": True,

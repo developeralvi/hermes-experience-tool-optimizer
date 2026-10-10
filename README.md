@@ -183,10 +183,10 @@ Key points:
 
 - **The effective default is `record_only`, not `advisory`.** Mode resolves as
   `EBTTO_MODE` env var → `plugins.entries.hermes-ebtto.settings.mode` →
-  `record_only`, so a fresh install never injects. Note that
-  `src/hermes_ebtto/config.py` declares `DEFAULTS["mode"] = "shadow"`, but that
-  dict is not read by the plugin's `register(ctx)` path and does not affect
-  runtime behaviour — see `docs/configuration/MODES.md`.
+  `config.DEFAULT_MODE` (`record_only`), so a fresh install never injects.
+  `DEFAULT_MODE` is the single constant both `config.py` and `register(ctx)`
+  resolve from, so the declared and effective defaults cannot drift apart — see
+  `docs/configuration/MODES.md`.
 - **`shadow` is intentionally asymmetric.** It injects learned guidance into the
   *model's prompt* (pre-selection) but observes only at the *tool call*
   (post-selection). This is a deliberate design choice, not an inconsistency:

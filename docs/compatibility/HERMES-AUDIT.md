@@ -63,7 +63,7 @@ All lifecycle hooks fire via `hermes_cli.lifecycle.invoke_hook(hook_name, **kwar
 
 `ebtto: { enabled: true, mode: shadow, ... }` under the Hermes config domain. All keys verified against `hermes_cli/config_defaults.py` as optional, override-able keys.
 
-Valid modes: `off`, `record_only`, `shadow`, `advisory`, `guarded`, `controlled_auto`. The example above shows `shadow` because that was the mode exercised during the original audit; the **effective runtime default is `record_only`**, so a fresh install records without injecting. Note that `src/hermes_ebtto/config.py::DEFAULTS["mode"]` also declares `shadow`, but that dict is not read by the plugin's `register(ctx)` path and does not govern runtime behaviour. Per-mode behaviour and the resolution order are documented in `docs/configuration/MODES.md`.
+Valid modes: `off`, `record_only`, `shadow`, `advisory`, `guarded`, `controlled_auto`. The example above shows `shadow` because that was the mode exercised during the original audit; the **effective runtime default is `record_only`**, so a fresh install records without injecting. `config.DEFAULT_MODE` is the single constant that both `config.py` and `register(ctx)` resolve from. Per-mode behaviour and the resolution order are documented in `docs/configuration/MODES.md`.
 
 ## 6. Decision log
 

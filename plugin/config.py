@@ -38,9 +38,23 @@ from typing import Any, Dict, Optional
 # Versioned defaults
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Canonical default mode
+# ---------------------------------------------------------------------------
+# ``DEFAULT_MODE`` is the SINGLE source of truth for "what mode applies when
+# neither the EBTTO_MODE environment variable nor an applicable context
+# configuration supplies one". ``plugins/__init__.py::register()`` resolves its
+# fallback from here so the declared default and the effective registration
+# fallback cannot drift apart again.
+#
+# ``record_only`` is deliberately the default: a fresh install must observe and
+# record without injecting guidance into the model's prompt. Guidance injection
+# is opt-in via EBTTO_MODE or an explicit config entry.
+DEFAULT_MODE = "record_only"
+
 DEFAULTS: Dict[str, Any] = {
     "enabled": True,
-    "mode": "shadow",
+    "mode": DEFAULT_MODE,
     "storage": {
         "backend": "sqlite",
         "path": "~/.hermes/.hermes-ebtto/ebtto.db",
