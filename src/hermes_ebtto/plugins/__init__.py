@@ -152,9 +152,29 @@ def register(ctx):
     ctx.register_hook() API. This satisfies the Hermes plugin manifest
     contract: modules with main: hermes_ebtto.plugins MUST provide
     a register(ctx) function.
+
+    ``mode`` is read from the plugin's own settings
+    (``plugins.entries.<id>.settings.mode`` via ``ctx.get_config``) so an
+    operator can move the plugin out of RECORD_ONLY without a code change;
+    it stays RECORD_ONLY when unset, so a fresh install never injects
+    guidance. ``ctx.get_config`` is fail-safe: an older/absent ctx yields
+    the default rather than an exception.
     """
+    # ``mode`` resolution order (first hit wins):
+    #   1. EBTTO_MODE env var — profile-independent escape hatch, so an
+    #      operator can force a mode without editing a profile-scoped config
+    #      that the routed profile may not inherit.
+    #   2. ctx.get_config("mode") — plugins.entries.<id>.settings.mode.
+    #   3. "record_only" — safe default: a fresh install never injects.
+    import os as _os
+    mode = _os.environ.get("EBTTO_MODE", "").strip()
+    if not mode:
+        try:
+            mode = ctx.get_config("mode", "record_only")
+        except Exception:
+            mode = "record_only"
     plugin = EBTTOPlugin(manifest=None, ctx=ctx, config={
-        "mode": "record_only",
+        "mode": mode,
         "enabled": True,
     })
     plugin.register()
@@ -670,7 +690,12 @@ class EBTTOPlugin:
             if not verdict.get("validated"):
                 return  # not enough evidence — no pattern row
 
-            pattern_id = f"pat-{tool_name}-{task_id[:8]}"
+            # Logical key = the tool alone: evidence is aggregated per tool, so
+            # the SAME (tool) must always map to the SAME pattern/strategy id.
+            # Deriving the id from task_id (as an earlier revision did) produced
+            # a fresh row per task and defeated the INSERT OR IGNORE dedup —
+            # one tool could accumulate many duplicate "patterns".
+            pattern_id = f"pat-{tool_name}"
             pattern = {
                 "pattern_id": pattern_id,
                 "pattern_name": f"{tool_name} best practice",
@@ -684,7 +709,7 @@ class EBTTOPlugin:
             self.store.record_pattern(pattern)
 
             # Also persist a strategy row so get_patterns_by_tool() can retrieve it.
-            strategy_id = f"strat-{tool_name}-{task_id[:8]}"
+            strategy_id = f"strat-{tool_name}"
             strategy = {
                 "strategy_id": strategy_id,
                 "strategy_name": f"{tool_name} best practice",
@@ -751,30 +776,37 @@ class EBTTOPlugin:
             log.warning("EBTTO retrieval error: %s", e)
             return None
 
-    @staticmethod
-    def _derive_task_family(user_message: str) -> str:
-        """Derive a coarse task family from the user's message.
+    def _derive_task_family(self, user_message: str) -> str:
+        """Derive the retrieval key from the user's message.
 
-        Deliberately conservative: a short keyword map that buckets the request so
-        retrieval is task-scoped rather than replaying every stored strategy. Falls
-        back to ``general`` so an unrecognised request never retrieves unrelated
-        experience.
+        The returned value MUST be a ``task_family`` that learning actually
+        stores. ``_learn_pattern`` persists strategies with
+        ``task_family = <tool_name>``, so the vocabulary here is tool names
+        (``terminal``, ``execute_code``, ``read_file``, ``patch``, ...). A
+        message-level label like "shell" or "file_read" never matches a stored
+        row and silently starves retrieval — the exact bug that kept the
+        Run-1 -> Run-2 guidance loop dead. Falls back to ``general`` so an
+        unrecognised request never retrieves unrelated experience.
         """
         text = (user_message or "").lower()
         if not text.strip():
             return "general"
         keywords = {
-            "file_edit": ("overwrite", "edit", "write file", "update file", "modify",
-                          "create file", "save"),
-            "file_read": ("read", "open", "show me", "inspect", "cat ", "view"),
-            "shell": ("run", "execute", "command", "terminal", "shell", "install",
-                      "npm", "pip", "git "),
-            "search": ("search", "find", "grep", "look for", "locate"),
-            "test": ("test", "pytest", "spec", "assert"),
-            "web": ("fetch", "download", "url", "http", "api", "website"),
+            "terminal": ("run", "execute", "command", "terminal", "shell", "install",
+                         "npm", "pip", "git ", "bash", "cmd"),
+            "execute_code": ("python", "script", "code", "execute_code", "snippet"),
+            "read_file": ("read", "open", "show me", "inspect", "cat ", "view",
+                          "look at"),
+            "patch": ("patch", "edit", "overwrite", "write file", "update file",
+                      "modify", "create file", "save", "fix"),
+            "write_file": ("write file", "create file", "new file", "save to"),
+            "search_files": ("search", "find", "grep", "look for", "locate"),
+            "browser_exec": ("browse", "website", "web page", "browser", "open url"),
         }
-        for family, words in keywords.items():
-            if any(w in text for w in words):
+        # Most specific first: a longer/more distinctive tool name wins when
+        # several match, so "write file" lands on write_file rather than patch.
+        for family in sorted(keywords, key=len, reverse=True):
+            if any(w in text for w in keywords[family]):
                 return family
         return "general"
 

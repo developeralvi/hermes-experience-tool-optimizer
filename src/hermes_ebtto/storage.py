@@ -666,9 +666,10 @@ class Store:
     def record_strategy(self, strategy: Any) -> str:
         """Persist a strategy row. ``strategy`` is a ``Strategy``-shaped object.
 
-        Written as INSERT OR IGNORE on ``strategy_id`` so a repeated learning pass
-        never duplicates a strategy; callers that learn new evidence call
-        :meth:`update_strategy_evidence` instead.
+        Upsert on ``strategy_id``: a repeated learning pass recomputes the full
+        aggregate evidence, so the row must be refreshed rather than ignored
+        (``INSERT OR IGNORE`` would freeze first-seen counts). One strategy per
+        (task_family, tool) logical key, so replays never accumulate duplicates.
         """
         data = strategy if isinstance(strategy, dict) else {
             k: getattr(strategy, k, None) for k in (
@@ -679,11 +680,24 @@ class Store:
         }
         strategy_id = data.get("strategy_id") or ev.new_id()
         self._execute(
-            """INSERT OR IGNORE INTO strategies
+            """INSERT INTO strategies
                (strategy_id, strategy_name, strategy_type, sequence, evidence_count,
                 success_count, failure_count, context_count, confidence,
                 last_validated_at, scope, status, task_family, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(strategy_id) DO UPDATE SET
+                 strategy_name    = excluded.strategy_name,
+                 strategy_type    = excluded.strategy_type,
+                 sequence         = excluded.sequence,
+                 evidence_count   = excluded.evidence_count,
+                 success_count    = excluded.success_count,
+                 failure_count    = excluded.failure_count,
+                 context_count    = excluded.context_count,
+                 confidence       = excluded.confidence,
+                 last_validated_at = excluded.last_validated_at,
+                 scope            = excluded.scope,
+                 status           = excluded.status,
+                 task_family      = excluded.task_family""",
             (
                 strategy_id,
                 data.get("strategy_name") or "unnamed",
@@ -791,7 +805,14 @@ class Store:
     # ---- patterns ---------------------------------------------
 
     def record_pattern(self, pattern: Any) -> str:
-        """Persist a detected pattern; idempotent on ``pattern_id``."""
+        """Persist a detected pattern; idempotent on ``pattern_id``.
+
+        Upsert semantics: callers recompute the FULL aggregate counts for the
+        pattern's logical key on every learning pass, so a repeat delivery must
+        refresh the row rather than be ignored (``INSERT OR IGNORE`` alone would
+        freeze the first-seen counts forever). Keyed on ``pattern_id`` so the
+        row count stays stable no matter how often learning re-runs.
+        """
         data = pattern if isinstance(pattern, dict) else {
             k: getattr(pattern, k, None) for k in (
                 "pattern_id", "pattern_name", "pattern_type", "evidence_count",
@@ -800,10 +821,18 @@ class Store:
         }
         pattern_id = data.get("pattern_id") or ev.new_id()
         self._execute(
-            """INSERT OR IGNORE INTO patterns
+            """INSERT INTO patterns
                (pattern_id, pattern_name, pattern_type, evidence_count,
                 success_count, failure_count, confidence, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(pattern_id) DO UPDATE SET
+                 pattern_name   = excluded.pattern_name,
+                 pattern_type   = excluded.pattern_type,
+                 evidence_count = excluded.evidence_count,
+                 success_count  = excluded.success_count,
+                 failure_count  = excluded.failure_count,
+                 confidence     = excluded.confidence,
+                 status         = excluded.status""",
             (pattern_id, data.get("pattern_name") or data.get("pattern_type") or "unnamed",
              data.get("pattern_type") or "unknown",
              int(data.get("evidence_count") or 0), int(data.get("success_count") or 0),
