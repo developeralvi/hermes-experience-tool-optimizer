@@ -791,6 +791,26 @@ class EBTTOPlugin:
         text = (user_message or "").lower()
         if not text.strip():
             return "general"
+
+        # An explicit tool mention is the strongest possible signal and must win
+        # over generic keyword matches. "Use the terminal tool to run python -c ..."
+        # names `terminal` and only incidentally mentions `python`; without this
+        # tier the `execute_code` keyword list (which contains "python") captures it
+        # and retrieval pulls experience for the wrong tool entirely.
+        tool_names = ("browser_exec", "execute_code", "write_file", "read_file",
+                      "search_files", "terminal", "patch")
+        for name in tool_names:
+            if name in text:
+                return name
+        for name, phrases in (("terminal", ("terminal tool",)),
+                              ("patch", ("patch tool",)),
+                              ("read_file", ("read file tool",))):
+            if any(p in text for p in phrases):
+                return name
+
+        # No explicit tool name: fall back to keyword matching. Longer/more
+        # distinctive families are tested first so "write file" lands on
+        # write_file rather than the broader patch bucket.
         keywords = {
             "terminal": ("run", "execute", "command", "terminal", "shell", "install",
                          "npm", "pip", "git ", "bash", "cmd"),
@@ -803,8 +823,6 @@ class EBTTOPlugin:
             "search_files": ("search", "find", "grep", "look for", "locate"),
             "browser_exec": ("browse", "website", "web page", "browser", "open url"),
         }
-        # Most specific first: a longer/more distinctive tool name wins when
-        # several match, so "write file" lands on write_file rather than patch.
         for family in sorted(keywords, key=len, reverse=True):
             if any(w in text for w in keywords[family]):
                 return family
