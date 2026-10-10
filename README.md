@@ -6,10 +6,9 @@
 
 EBTTO makes agent tool-use observable, auditable, and improvable through real
 execution evidence. It hooks the actual Hermes runtime — `pre_tool_call`,
-`post_tool_call`, `pre_llm_call`, `on_session_start`, and
-`on_session_finalize`/`on_session_end` — to capture trajectories, learn from
-failures, and inject compact guidance into future turns **before** the model
-selects a tool.
+`post_tool_call`, `pre_llm_call`, and `on_session_end` — to capture
+trajectories, learn from failures, and inject compact guidance into future
+turns **before** the model selects a tool.
 
 ---
 
@@ -94,20 +93,14 @@ EBTTO/
 │   ├── cli.py                   # 13 CLI commands
 │   └── migrations/1.sql         # SQLite schema
 ├── tests/
-│   ├── unit/                    # unit, contract, integration tests
-│   ├── security/                # prompt injection, poisoning, path traversal
-│   ├── regression/              # degraded-strategy revalidation
+│   ├── unit/                    # unit + package tests
 │   └── benchmark/               # baseline vs EBTTO behavioral tests
 ├── docs/
-│   ├── architecture/            # System design
 │   ├── compatibility/           # Hermes runtime contract
 │   ├── configuration/           # Modes, storage, privacy
-│   ├── development/             # Contribution guide
-│   ├── operations/              # CLI reference
 │   ├── security/                # Threat model
-│   ├── benchmarks/              # Behavioral results
 │   └── acceptance/              # Forensic audit reports
-├── .github/workflows/           # CI (unit, integration, security, etc.)
+├── .github/workflows/           # CI (test matrix, lint, typecheck, package)
 ├── .gitignore
 ├── pyproject.toml               # Build system & project metadata
 └── Makefile                     # Common commands
@@ -115,7 +108,8 @@ EBTTO/
 
 ## Installation
 
-See the [Installation](docs/installation.md) page for full details.
+See the [Installation](#installation) section below, or `docs/` for the
+compatibility and configuration references.
 
 ```bash
 # 1. Install the package
@@ -135,7 +129,7 @@ The plugin is a standard Hermes plugin: `plugin.yaml` declares
 - **License**: Apache-2.0
 
 Full compatibility contract and lifecycle detail:
-[docs/compatibility/HERMES-RUNTIME-CONTRACT.md](docs/compatibility/HERMES-RUNTIME-CONTRACT.md)
+[docs/compatibility/HERMES-INTEGRATION-CONTRACT.md](docs/compatibility/HERMES-INTEGRATION-CONTRACT.md)
 
 ## Provider requirements
 
@@ -150,11 +144,18 @@ not an optional extra:
 | 3 | Another already-configured provider |
 | 4 | External provider only if valid credentials exist |
 
-The current `cline-free` route returns **401** and is marked unavailable.
-Once a working tool-capable provider is available, the behavioral acceptance
-gates (Phases 11–22) can run.
+The provider in this environment's Hermes config is a working tool-capable
+route; the behavioral acceptance gates require it to stay available. If the
+configured provider returns 401 (or otherwise cannot execute tools), live
+behavioral tests cannot run and the gates remain BLOCKED.
 
-See [Provider Runtime Compatibility](docs/acceptance/PROVIDER-RUNTIME-COMPATIBILITY.md).
+Live runtime evidence (agent.log, this host, 2026-10-11): plugin registered
+`mode=shadow`, `pre_llm_call` guidance injected 4 times, `[EBTTO SHADOW]
+Guidance` logged 126 times, and 560 pattern-persistence events recorded for
+tools `terminal`, `execute_code`, `patch`, `read_file`, `skill_view`, and
+`skill_manage`. These prove the recording → learning → retrieval loop fires
+in a live Hermes process; they do not prove a measured behavioral
+improvement (see Known limitations).
 
 ## Modes
 
@@ -251,8 +252,11 @@ values are reported.
 hermes ebtto benchmark
 ```
 
-See [docs/benchmarks/REAL-BEHAVIORAL-RESULTS.md](docs/benchmarks/REAL-BEHAVIORAL-RESULTS.md)
-for actual measured results.
+`tests/benchmark/test_behavioral.py` is the offline, dependency-free
+simulation suite (baseline vs EBTTO, smart-retry, regression detection,
+poisoning resistance — 5 tests, all passing). A live baseline-vs-treatment
+behavioral comparison has **not** been run and is not yet proven; see Known
+limitations.
 
 ## Uninstall
 
@@ -274,9 +278,16 @@ Or restore the previous plugin version from git and reinstall.
 
 ## Known limitations
 
-- Behavioral improvement requires a **working tool-capable provider**.
-  The current `cline-free` provider route returns 401.
-- `auto` mode is opt-in only and disabled by default.
+- A **live baseline-vs-treatment behavioral improvement is NOT YET PROVEN**.
+  The recording → learning → retrieval loop is verified live (see Provider
+  requirements); a controlled A/B run that isolates guidance as the only
+  variable has not been executed. The offline `test_harness_ab.py` harness
+  (41/41 checks) prepares and validates the experiment but does not perform
+  inference.
+- Behavioral improvement requires a **working tool-capable provider**. If the
+  configured provider cannot execute tools, live tests cannot run.
+- `controlled_auto` mode is opt-in only and disabled by default; the effective
+  default is `record_only`.
 - Parametric experience is experimental and disabled by default.
 - This plugin is a **behavior-monitoring and advisory layer**; it does not
   inject system instructions into the model itself.

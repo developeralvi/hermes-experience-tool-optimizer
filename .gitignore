@@ -132,3 +132,6 @@ pyrightconfig.json
 # CodeGraph runtime
 .codegraph/
 codegraph.db
+
+# Local clean-install test environments
+.venv-clean-install/
