@@ -144,7 +144,7 @@ def classify_error(
         return Classification(class_="permission_failure", confidence=0.80, evidence=evidence)
     if _match(msg, ["tool error", "tool failed", "executable not found", "command failed", "exit code"]):
         return Classification(class_="tool_failure", confidence=0.75, evidence=evidence)
-    if _match(msg, ["stale", "not found", "expired", "used", "already"]):
+    if _match(msg, ["stale", "not found", "no such file", "expired", "used", "already"]):
         return Classification(class_="stale_state", confidence=0.70, evidence=evidence)
     if _match(msg, ["schema", "invalid", "missing", "unexpected", "type"]):
         return Classification(class_="invalid_argument_schema", confidence=0.80, evidence=evidence)

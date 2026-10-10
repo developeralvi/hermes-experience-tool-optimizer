@@ -14,6 +14,7 @@ open. The file is portable and can be backed up with ``VACUUM INTO``.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -30,7 +31,7 @@ DEFAULT_DB_NAME = "ebtto.db"
 WAL_MODE = "wal"
 BUSY_TIMEOUT_MS = 5000
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Connection
@@ -426,17 +427,24 @@ class Store:
         try:
             current = _read_version(conn._conn)
         except sqlite3.OperationalError:
-            # Fresh database: the schema_version table does not exist yet.
+            # Fresh database: create the base schema at version 1, then let the
+            # migration loop below walk the rest of the chain. Stamping
+            # SCHEMA_VERSION here would skip every numbered migration and leave
+            # later columns/indexes missing (schema_version would claim 2 while
+            # the schema was still v1).
             _create_schema(conn._conn)
-            _write_version(conn._conn, SCHEMA_VERSION)
-            current = SCHEMA_VERSION
+            _write_version(conn._conn, 1)
+            current = 1
+        applied = []
         for m in _migration_files():
             if int(m.stem) > current:
                 _apply_migration(conn._conn, int(m.stem))
                 _write_version(conn._conn, int(m.stem))
                 current = int(m.stem)
+                applied.append(int(m.stem))
         conn.commit()
         conn.close()
+        return applied
 
     def close(self) -> None:
         """Close any open connections (best-effort)."""
@@ -564,19 +572,30 @@ class Store:
     # ---- errors --------------------------------------------------
 
     def record_error(self, error: ev.Error) -> str:
-        self._execute(
-            """INSERT INTO errors
-               (error_id, task_id, turn_id, tool_call_id, tool_name, error_class,
-                confidence, error_message, evidence, created_at)
-               VALUES (:error_id, :task_id, :turn_id, :tool_call_id, :tool_name,
-                       :error_class, :confidence, :error_message, :evidence,
-                       :created_at)""",
-            {
-                **ev.event_to_dict(error),
-                "evidence": self._json(error.evidence),
-            },
-        )
-        return error.event_id
+            """Persist one classified failure.
+
+            Idempotent on the natural business key ``(task_id, turn_id,
+            tool_call_id)``: Hermes' single-fire contract normally delivers each
+            tool_call_id once, but a redelivery (retry, replayed turn, or a second
+            observer) must not create a duplicate error row.
+
+            Concurrency-safe: uses ``INSERT OR IGNORE`` against the
+            ``idx_errors_logical_key`` UNIQUE index (migration 3) rather than a
+            check-then-insert sequence, which would race between two simultaneous
+            callbacks.
+            """
+            params = dict(ev.event_to_dict(error))
+            params["evidence"] = self._json(error.evidence)
+            self._execute(
+                """INSERT OR IGNORE INTO errors
+                   (error_id, task_id, turn_id, tool_call_id, tool_name, error_class,
+                    confidence, error_message, evidence, created_at)
+                   VALUES (:error_id, :task_id, :turn_id, :tool_call_id, :tool_name,
+                           :error_class, :confidence, :error_message, :evidence,
+                           :created_at)""",
+                params,
+            )
+            return error.event_id
 
     # ---- trajectories ----------------------------------------------
 
@@ -644,14 +663,154 @@ class Store:
 
     # ---- strategies ---------------------------------------------
 
-    def record_strategy(self, strategy: ev.ToolCall) -> str:
-        """Placeholder — strategies are strings; see ``learning`` module."""
-        raise NotImplementedError
+    def record_strategy(self, strategy: Any) -> str:
+        """Persist a strategy row. ``strategy`` is a ``Strategy``-shaped object.
+
+        Written as INSERT OR IGNORE on ``strategy_id`` so a repeated learning pass
+        never duplicates a strategy; callers that learn new evidence call
+        :meth:`update_strategy_evidence` instead.
+        """
+        data = strategy if isinstance(strategy, dict) else {
+            k: getattr(strategy, k, None) for k in (
+                "strategy_id", "strategy_name", "strategy_type", "sequence",
+                "evidence_count", "success_count", "failure_count", "context_count",
+                "confidence", "last_validated_at", "scope", "status", "task_family",
+            )
+        }
+        strategy_id = data.get("strategy_id") or ev.new_id()
+        self._execute(
+            """INSERT OR IGNORE INTO strategies
+               (strategy_id, strategy_name, strategy_type, sequence, evidence_count,
+                success_count, failure_count, context_count, confidence,
+                last_validated_at, scope, status, task_family, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                strategy_id,
+                data.get("strategy_name") or "unnamed",
+                data.get("strategy_type") or "best",
+                self._json(data.get("sequence") or []),
+                int(data.get("evidence_count") or 0),
+                int(data.get("success_count") or 0),
+                int(data.get("failure_count") or 0),
+                int(data.get("context_count") or 0),
+                float(data.get("confidence") or 0.0),
+                data.get("last_validated_at"),
+                data.get("scope") or "global",
+                data.get("status") or "candidate",
+                data.get("task_family") or "",
+                _utcnow_iso(),
+            ),
+        )
+        return strategy_id
+
+    def get_patterns_by_tool(self, tool_name: str, *, limit: int = 3) -> List[Dict[str, Any]]:
+        """Return the best-evidenced strategies applicable to ``tool_name``.
+
+        This is the read path the plugin's guidance retrieval calls. Strategies are
+        stored as JSON ``sequence`` entries that name the tool, so a strategy
+        matches when any sequence step targets ``tool_name`` — or when the strategy
+        is global (empty sequence), which applies to any tool.
+
+        Ranked by success rate, then evidence, then confidence; ``disabled`` and
+        ``quarantined`` strategies are excluded so degraded/regressed experience is
+        never served as guidance.
+        """
+        if not tool_name:
+            return []
+        rows = self._execute(
+            """SELECT strategy_id, strategy_name, strategy_type, sequence, evidence_count,
+                      success_count, failure_count, context_count, confidence, status, scope,
+                      task_family
+                 FROM strategies
+                WHERE status NOT IN ('disabled', 'quarantined')
+                ORDER BY (CAST(success_count AS REAL) / MAX(1, evidence_count)) DESC,
+                         evidence_count DESC, confidence DESC
+                LIMIT 200""",
+            commit=False,
+        ).fetchall()
+
+        matched: List[Dict[str, Any]] = []
+        for r in rows:
+            (strategy_id, name, stype, sequence_json, evidence, success, failure,
+             contexts, confidence, status, scope, task_family) = r
+            # Family match first: the pre-LLM hook keys retrieval by a coarse task
+            # family (file_edit, shell, ...). An empty family means the strategy was
+            # stored before family scoping existed, so it stays globally applicable.
+            family_ok = (not task_family) or (task_family == tool_name)
+            if not family_ok:
+                continue
+            try:
+                sequence = json.loads(sequence_json) if sequence_json else []
+            except (TypeError, ValueError):
+                sequence = []
+            # Also accept a strategy whose sequence names this exact tool, so the
+            # pre-tool hook (which passes a tool name) still finds tool experience.
+            tools_in_sequence = {
+                str(step.get("tool"))
+                for step in sequence
+                if isinstance(step, dict) and step.get("tool")
+            }
+            if tools_in_sequence and tool_name not in tools_in_sequence and not family_ok:
+                continue
+            total = evidence or (success + failure) or 0
+            matched.append({
+                "strategy_id": strategy_id,
+                "strategy_name": name,
+                "strategy_type": stype,
+                "evidence_count": evidence or 0,
+                "success_count": success or 0,
+                "failure_count": failure or 0,
+                "context_count": contexts or 0,
+                "confidence": float(confidence or 0.0),
+                "success_rate": (success / total) if total else 0.0,
+                "status": status,
+                "scope": scope,
+                "task_family": task_family or "",
+            })
+            if len(matched) >= limit:
+                break
+        return matched
+
+    def update_strategy_evidence(self, strategy_id: str, *, success: bool,
+                                 confidence: Optional[float] = None,
+                                 status: Optional[str] = None) -> None:
+        """Fold one new observed outcome into a strategy's evidence counters."""
+        self._execute(
+            """UPDATE strategies
+                  SET evidence_count = evidence_count + 1,
+                      success_count  = success_count + ?,
+                      failure_count  = failure_count + ?,
+                      confidence     = COALESCE(?, confidence),
+                      status         = COALESCE(?, status),
+                      last_validated_at = ?
+                WHERE strategy_id = ?""",
+            (1 if success else 0, 0 if success else 1, confidence,
+             status, _utcnow_iso(), strategy_id),
+        )
 
     # ---- patterns ---------------------------------------------
 
-    def record_pattern(self, pattern: ev.ToolCall) -> str:
-        raise NotImplementedError
+    def record_pattern(self, pattern: Any) -> str:
+        """Persist a detected pattern; idempotent on ``pattern_id``."""
+        data = pattern if isinstance(pattern, dict) else {
+            k: getattr(pattern, k, None) for k in (
+                "pattern_id", "pattern_name", "pattern_type", "evidence_count",
+                "success_count", "failure_count", "confidence", "status",
+            )
+        }
+        pattern_id = data.get("pattern_id") or ev.new_id()
+        self._execute(
+            """INSERT OR IGNORE INTO patterns
+               (pattern_id, pattern_name, pattern_type, evidence_count,
+                success_count, failure_count, confidence, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pattern_id, data.get("pattern_name") or data.get("pattern_type") or "unnamed",
+             data.get("pattern_type") or "unknown",
+             int(data.get("evidence_count") or 0), int(data.get("success_count") or 0),
+             int(data.get("failure_count") or 0), float(data.get("confidence") or 0.0),
+             data.get("status") or "candidate", _utcnow_iso()),
+        )
+        return pattern_id
 
     # ---- retrieval ---------------------------------------------
 

@@ -28,6 +28,12 @@ dev = ["pytest>=8.0", "pytest-cov", "ruff"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Migrations are loaded from the INSTALLED package at runtime
+# (storage.py::MIGRATIONS_DIR = Path(__file__).parent / "migrations"), so the .sql
+# files must ship in the wheel or every install silently runs with a v1 schema.
+hermes_ebtto = ["migrations/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

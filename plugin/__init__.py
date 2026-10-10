@@ -24,11 +24,24 @@ def register(ctx):
     ``plugin.yaml`` and calls its ``register(ctx)`` function. This function
     creates the EBTTOPlugin and registers all hooks via the public
     ``ctx.register_hook()`` API.
+
+    Mode and enabled state come from the ``EBTTO_MODE`` / ``EBTTO_ENABLED``
+    environment variables (defaulting to ``record_only`` / enabled) so an
+    operator can opt into advisory behaviour without patching code. An
+    unrecognised mode falls back to ``record_only`` — the safe default.
     """
+    import os
+
+    valid_modes = ("record_only", "shadow", "advisory", "guarded", "controlled_auto", "off")
+    mode = os.environ.get("EBTTO_MODE", "record_only").strip().lower()
+    if mode not in valid_modes:
+        mode = "record_only"
+    enabled = os.environ.get("EBTTO_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
     from .plugins import EBTTOPlugin
     plugin = EBTTOPlugin(manifest=None, ctx=ctx, config={
-        "mode": "record_only",
-        "enabled": True,
+        "mode": mode,
+        "enabled": enabled,
     })
     plugin.register()
     return plugin

@@ -9,7 +9,9 @@ Does NOT modify Hermes core.
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 import os
 from datetime import datetime, timezone
@@ -38,7 +40,51 @@ def _alias_canonical_package() -> None:
         _sys.modules["hermes_ebtto"] = parent
 
 
+def _payload_reports_error(result: Any) -> bool:
+    """True when a tool RESULT payload itself reports a failure.
+
+    Hermes tool results are JSON strings of the shape
+    ``{"error": "..."}`` / ``{"status": "error"}`` / ``{"error": {...}}``.
+    This mirrors the same observable-derivation Hermes' own
+    ``_tool_result_observer_fields`` performs, so a status-less delivery
+    cannot be mistaken for success. Parsing never raises: an unparseable or
+    empty payload is treated as "no reported error" and the decision falls
+    back to the status field alone.
+    """
+    if isinstance(result, dict):
+        payload = result
+    elif isinstance(result, (bytes, bytearray)):
+        try:
+            payload = json.loads(result.decode("utf-8", "replace"))
+        except Exception:
+            return False
+    elif isinstance(result, str):
+        text = result.strip()
+        if not text.startswith("{"):
+            return False
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return False
+    else:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("error"):
+        return True
+    return str(payload.get("status") or "").lower() in ("error", "failed", "failure", "cancelled")
+
+
 _alias_canonical_package()
+
+
+# Provider credential prefixes that ``privacy.redact(mode="masked")`` does not
+# cover. Tool error text routinely embeds them inside prose ("auth failed for
+# token sk-live-..."), where a whole-string check cannot see them.
+EMBEDDED_KEY_PREFIX_RE = re.compile(
+    r"\b(?:sk|pk|rk)[-\w]{16,}\b|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}\b|\bAKIA[0-9A-Z]{16}\b|\bAI[A-Za-z0-9]{30,}\b|\blin_api_[A-Za-z0-9]{20,}\b",
+    re.I,
+)
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +126,15 @@ class EBTTOStore:
 
     def record_error(self, error):
         return self.store.record_error(error)
+
+    def record_pattern(self, pattern):
+        return self.store.record_pattern(pattern)
+
+    def record_strategy(self, strategy):
+        return self.store.record_strategy(strategy)
+
+    def get_patterns_by_tool(self, tool_name, limit=3):
+        return self.store.get_patterns_by_tool(tool_name, limit=limit)
 
     def get_trajectories(self, **filters):
         return self.store.get_trajectories(**filters)
@@ -189,6 +244,15 @@ class EBTTOPlugin:
 
     def _register_hooks(self):
         """Register hook callbacks via the public ctx.register_hook() API."""
+        # Register pre_llm_call: inject retrieved experience into the user message
+        # BEFORE the provider/tool-calling loop is built, so the model's next
+        # tool-selection decision can actually see prior experience. This is the
+        # hook that carries the Run-1 -> Run-2 behavioral loop; pre_tool_call
+        # fires only AFTER the model has already chosen the tool and is therefore
+        # too late to influence that choice.
+        if self.mode != self.MODE_OFF:
+            self._hook_handles.append(self.ctx.register_hook("pre_llm_call", self._hook_pre_llm_call))
+
         # Register pre_tool_call: intercept before the tool executes
         if self.mode != self.MODE_OFF:
             self._hook_handles.append(self.ctx.register_hook("pre_tool_call", self._hook_pre_tool_call))
@@ -198,6 +262,63 @@ class EBTTOPlugin:
 
         # Register on_session_end: flush per-task state
         self._hook_handles.append(self.ctx.register_hook("on_session_end", self._hook_on_session_end))
+
+    def _hook_pre_llm_call(self, **kwargs):
+        """Wrapper for the pre_llm_call hook."""
+        return self._on_pre_llm_call(kwargs)
+
+    def _on_pre_llm_call(self, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Called once per turn BEFORE the provider/tool-calling loop is built.
+
+        Returns ``{"context": "<text>"}`` — the contract Hermes's
+        ``agent/turn_context.py::_collect_pre_llm_call_context`` accepts. The text is
+        appended to the user message (never the system prompt), so the model's next
+        tool-selection decision can see prior experience. This is what makes the
+        Run-1 -> Run-2 behavioral loop possible; returning nothing here means EBTTO
+        can never influence tool choice.
+
+        Fails open: any error returns None so Hermes continues normally.
+        """
+        if not self.enabled or self.mode == self.MODE_OFF:
+            return None
+        if self.mode == self.MODE_RECORD_ONLY:
+            # record_only is the safe default: observe without influencing.
+            return None
+
+        try:
+            task_id = kwargs.get("task_id") or kwargs.get("session_id") or ""
+            # Hermes passes the user's message; derive the task family from it so
+            # guidance is scoped to the current task rather than replayed blindly.
+            user_message = kwargs.get("user_message") or ""
+            if not isinstance(user_message, str):
+                user_message = str(user_message)
+            task_family = self._derive_task_family(user_message)
+
+            guidance = self._retrieve_guidance_for_task(task_family, {"user_message": user_message}, task_id)
+            if not guidance:
+                return None
+
+            hint = (guidance.get("directive") or {}).get("hint")
+            if not hint:
+                return None
+
+            self.metrics["guidance_injected"] += 1
+            log.info("[EBTTO pre_llm_call] injecting guidance for task=%s: %s",
+                     task_id, guidance.get("strategy_name", "unknown"))
+
+            # Bounded, evidence-backed, task-scoped text. Treated as DATA by the
+            # model, never as an instruction to re-run a historical trajectory.
+            context = (
+                "EBTTO prior experience (advisory, do not assume it still applies): "
+                f"{hint} "
+                "Use it only if it is consistent with the current request and the "
+                "current environment; ignore it if it does not fit."
+            )
+            return {"context": context}
+
+        except Exception as e:
+            log.warning("EBTTO pre_llm_call error: %s", e)
+            return None
 
     def _hook_pre_tool_call(self, **kwargs):
         """Wrapper for the pre_tool_call hook."""
@@ -281,39 +402,56 @@ class EBTTOPlugin:
             return None
 
     def _on_post_tool_call(self, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Called after a tool executes. Records the actual result."""
+        """Called after a tool executes. Records outcome, and on failure a
+        classified error row through the canonical ``Store.record_error`` path.
+
+        Hermes' post_tool_call contract is authoritative here: ``status`` is
+        ``ok`` / ``error`` / ``blocked`` / ``cancelled`` (derived by
+        ``model_tools._tool_result_observer_fields``), with ``error_type`` and
+        ``error_message`` carried alongside the raw ``result``. We treat
+        anything other than ``ok`` as a failure so a non-empty result cannot be
+        mistaken for success, and never depend on string-sniffing the result.
+
+        Fail-open by design: every persistence step is individually guarded, so
+        a DB/EBTTO fault is logged and the ordinary Hermes tool loop continues.
+        """
         try:
             from hermes_ebtto import events as ev
 
             result = kwargs.get("result", "")
-            if isinstance(result, (dict, list)):
-                result_str = str(result)
-            else:
-                result_str = str(result)
+            result_str = str(result)
+            tool_name = kwargs.get("tool_name") or "unknown"
+            status = str(kwargs.get("status") or "ok").strip()
+            error_type = kwargs.get("error_type")
+            error_message = kwargs.get("error_message")
+            task_id = kwargs.get("task_id") or kwargs.get("session_id") or ""
+            tool_call_id = kwargs.get("tool_call_id") or ""
+            turn_id = kwargs.get("turn_id") or "turn-1"
 
-            tool_name = kwargs.get("tool_name", "unknown")
-            status = kwargs.get("status", "SUCCESS")
-            success = status in ("SUCCESS", "success", "0", "exit 0", "OK", "ok")
+            # The wire contract marks success explicitly as "ok"; every other
+            # status (error/blocked/cancelled) is a failure. Hermes also reports
+            # structured errors inside a JSON result, so a status-less delivery
+            # still gets checked via the payload before being called success.
+            success = self._is_success(status=status, result=result, tool_name=tool_name)
 
-            if self.store is not None and self._started:
-                task_id = kwargs.get("task_id") or kwargs.get("session_id", "")
-                tool_call_id = kwargs.get("tool_call_id", "")
+            if self.store is not None and self._started and task_id and tool_call_id:
+                outcome = ev.Outcome(
+                    task_id=task_id,
+                    turn_id=turn_id,
+                    result="SUCCESS" if success else "FAILURE",
+                    confidence=0.90,
+                    evidence={"tool": tool_name, "status": status,
+                              "result": self._safe_text(result_str)[:500]},
+                )
+                self.store.record_outcome(outcome)
 
-                if task_id and tool_call_id:
-                    outcome = ev.Outcome(
-                        task_id=task_id,
-                        turn_id=kwargs.get("turn_id", "turn-1"),
-                        result="SUCCESS" if success else "FAILURE",
-                        confidence=0.90,
-                        evidence={"result": result_str[:500], "tool": tool_name, "status": status},
+                if not success:
+                    self._record_failure(
+                        task_id=task_id, turn_id=turn_id,
+                        tool_call_id=tool_call_id, tool_name=tool_name,
+                        status=status, error_type=error_type,
+                        error_message=error_message, result=result,
                     )
-                    self.store.record_outcome(outcome)
-
-                    from hermes_ebtto.classification import classify_error
-                    if not success:
-                        error_class = classify_error(tool_name=tool_name, result_message=result_str)
-                        log.info("[EBTTO] Classified as: %s (confidence=%.2f)",
-                                 error_class, 0.70)
 
             self.metrics["tool_calls"] += 1
             if success:
@@ -321,11 +459,134 @@ class EBTTOPlugin:
             else:
                 self.metrics["failures"] += 1
 
+            # GAP-2: after persisting the outcome, evaluate whether the
+            # accumulated evidence for this tool qualifies as a pattern.
+            if self.store is not None and self._started and task_id and tool_call_id:
+                try:
+                    self._learn_pattern(task_id=task_id, tool_name=tool_name,
+                                        success=success)
+                except Exception as exc:
+                    log.warning("EBTTO pattern learning failed for %s: %s",
+                                tool_name, exc)
+
             return None
 
         except Exception as e:
             log.warning("EBTTO post_tool_call error: %s", e)
             return None
+
+    # -- failure classification + persistence (GAP 1) ----------------------
+
+    @staticmethod
+    def _is_success(*, status: str, result: Any, tool_name: str) -> bool:
+        """Decide success from Hermes' documented hook contract.
+
+        Order matters: an explicit ``ok`` wins; a structured ``{"error": ...}``
+        payload fails even when the status field was omitted; otherwise the
+        status string is matched against the known failure vocabulary.
+        """
+        if status:
+            if status == "ok":
+                return not _payload_reports_error(result)
+            if status in ("error", "blocked", "cancelled", "failed", "failure"):
+                return False
+        return not _payload_reports_error(result)
+
+    @staticmethod
+    def _safe_text(text: Any, limit: int = 4000) -> str:
+        """Privacy-sanitize any text before it reaches storage or a log line.
+
+        Three layers, all fail-open:
+          1. ``redact_str`` — whole-string credential case.
+          2. ``redact(mode="masked")`` — known embedded fragments
+             (bearer, JWT, AWS keys, connection strings).
+          3. ``EMBEDDED_KEY_PREFIX_RE`` — provider key prefixes embedded in
+             prose, e.g. ``"auth failed for token sk-live-..."``. Neither layer
+             1 nor 2 catches these: ``redact_str`` only judges the ENTIRE
+             string, and the masked regex set has no ``sk-``/``gh-`` entry.
+             Tool error messages are exactly this case.
+        """
+        raw = str(text)[:limit]
+        try:
+            from hermes_ebtto import privacy as pr
+            out = pr.redact_str(raw)
+            if out == raw:
+                out = pr.redact(raw, mode="masked")
+            if out == raw:
+                out = EMBEDDED_KEY_PREFIX_RE.sub("[REDACTED]", out)
+            return out
+        except Exception:
+            # Redaction must never be the reason a failure is lost.
+            return raw
+
+    @staticmethod
+    def _safe_evidence(obj: Any) -> Any:
+        """Recursively redact a structured payload for storage."""
+        try:
+            from hermes_ebtto import privacy as pr
+            return pr.sanitize_payload(obj)
+        except Exception:
+            return {"note": "payload dropped: sanitization unavailable"}
+
+    def _record_failure(self, *, task_id: str, turn_id: str, tool_call_id: str,
+                        tool_name: str, status: str, error_type: Optional[str],
+                        error_message: Optional[str], result: Any) -> None:
+        """Classify a genuine failure and persist it as a canonical Error event.
+
+        The classifier receives only observable hook fields — never guessed
+        values. Correlation uses the SAME ``task_id``/``tool_call_id`` that the
+        outcome record was written with, so the three rows join exactly. One
+        delivery yields at most one error row: a repeated delivery of the same
+        tool_call_id is ignored via the UNIQUE constraint on ``error_id`` plus
+        the caller's single-fire contract.
+        """
+        safe_message = self._safe_text(error_message if error_message else str(result))
+        safe_result = self._safe_text(str(result))
+        evidence = {
+            "tool": tool_name,
+            "status": status,
+            "hook_error_type": error_type,
+            "result_preview": safe_result[:500],
+        }
+
+        try:
+            from hermes_ebtto.classification import classify_error
+
+            classification = classify_error(
+                tool_name=tool_name,
+                result_message=safe_result,
+                error_type=error_type,
+                error_code=None,
+                status_code=None,
+                evidence=self._safe_evidence(evidence),
+            )
+            error_class = classification.class_
+            confidence = classification.confidence
+        except Exception as exc:
+            # Classification is diagnostic; never lose the failure itself.
+            log.warning("EBTTO classify_error failed for %s: %s", tool_name, exc)
+            error_class = "unknown"
+            confidence = 0.0
+
+        log.info("[EBTTO] Failure on %s classified as %s (confidence=%.2f)",
+                 tool_name, error_class, confidence)
+
+        try:
+            from hermes_ebtto import events as ev
+
+            error = ev.Error(
+                task_id=task_id,
+                turn_id=turn_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                error_class=error_class,
+                confidence=confidence,
+                error_message=safe_message,
+                evidence=self._safe_evidence({**evidence, "error_class": error_class}),
+            )
+            self.store.record_error(error)
+        except Exception as exc:
+            log.warning("EBTTO record_error failed (fail-open) for %s: %s", tool_name, exc)
 
     def _on_session_end(self, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
@@ -342,6 +603,112 @@ class EBTTOPlugin:
             log.warning("EBTTO session_end error: %s", e)
             return None
 
+    # -- GAP-2: pattern learning (Phase 22) ---------------------------------
+
+    def _learn_pattern(self, *, task_id: str, tool_name: str, success: bool) -> None:
+        """Aggregate evidence for ``tool_name`` and persist a qualified pattern.
+
+        The chain is: persisted outcome → evidence aggregation →
+        ``evaluate_pattern()`` qualification → ``record_pattern()``.
+
+        Qualification thresholds (from ``learning.py``):
+
+        * ``MIN_EVIDENCE_FOR_VALIDATED`` = 5 — at least 5 independent outcomes
+        * ``MIN_SUCCESS_RATE`` = 0.8 — at least 80% of outcomes must succeed
+        * ``MIN_INDEPENDENT_CONTEXTS`` = 3 — at least 3 distinct contexts
+
+        A pattern is NOT created on every call. It is only persisted when the
+        accumulated evidence for this tool clears all three thresholds. The
+        ``patterns`` table is the read path for ``get_patterns_by_tool()``.
+        """
+        try:
+            from hermes_ebtto import learning as L
+
+            # Resolve the inner Store (EBTTOStore wraps Store).
+            inner = getattr(self.store, "store", self.store)
+
+            # Aggregate evidence from the outcomes table for this tool.
+            # NOTE: ``outcomes`` stores ``tool_name`` inside the ``evidence``
+            # JSON blob (key ``tool``), not as a column. Use ``json_extract``
+            # to filter by it.
+            rows = inner._execute(
+                """SELECT result, COUNT(*) AS n
+                   FROM outcomes
+                  WHERE json_extract(evidence, '$.tool') = :tool_name
+                  GROUP BY result""",
+                {"tool_name": tool_name},
+                commit=False,
+            ).fetchall()
+
+            success_count = 0
+            failure_count = 0
+            for result, count in rows:
+                if result == "SUCCESS":
+                    success_count = count
+                elif result == "FAILURE":
+                    failure_count = count
+
+            evidence_count = success_count + failure_count
+            if evidence_count == 0:
+                return
+
+            # Count distinct task_ids as independent contexts.
+            ctx_count = inner._execute(
+                """SELECT COUNT(DISTINCT task_id) FROM outcomes
+                  WHERE json_extract(evidence, '$.tool') = :tool_name""",
+                {"tool_name": tool_name},
+                commit=False,
+            ).fetchone()[0]
+
+            # Qualify via the existing learning module.
+            verdict = L.evaluate_pattern(
+                success_count=success_count,
+                evidence_count=evidence_count,
+                independent_contexts=ctx_count,
+            )
+
+            if not verdict.get("validated"):
+                return  # not enough evidence — no pattern row
+
+            pattern_id = f"pat-{tool_name}-{task_id[:8]}"
+            pattern = {
+                "pattern_id": pattern_id,
+                "pattern_name": f"{tool_name} best practice",
+                "pattern_type": "tool_best_practice",
+                "evidence_count": evidence_count,
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "confidence": verdict.get("confidence", 0.0),
+                "status": "validated",
+            }
+            self.store.record_pattern(pattern)
+
+            # Also persist a strategy row so get_patterns_by_tool() can retrieve it.
+            strategy_id = f"strat-{tool_name}-{task_id[:8]}"
+            strategy = {
+                "strategy_id": strategy_id,
+                "strategy_name": f"{tool_name} best practice",
+                "strategy_type": "tool_best_practice",
+                "sequence": [{"tool": tool_name, "order": 1}],
+                "evidence_count": evidence_count,
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "context_count": ctx_count,
+                "confidence": verdict.get("confidence", 0.0),
+                "scope": "tool",
+                "status": "validated",
+                "task_family": tool_name,
+            }
+            self.store.record_strategy(strategy)
+
+            log.info(
+                "[EBTTO] Pattern persisted for %s: %s (evidence=%d, success_rate=%.2f)",
+                tool_name, pattern_id, evidence_count,
+                success_count / evidence_count,
+            )
+        except Exception as exc:
+            log.warning("EBTTO pattern learning failed for %s: %s", tool_name, exc)
+
     def _retrieve_guidance_for_task(self, tool_name: str, args: Dict[str, Any],
                                     task_id: str) -> Optional[Dict[str, Any]]:
         if self.store is None or not self.enabled:
@@ -352,28 +719,64 @@ class EBTTOPlugin:
             from hermes_ebtto import scoring as sc
 
             from hermes_ebtto.normalization import task_fingerprint
-            fp = task_fingerprint(tool_name=tool_name, args=args, session_id=task_id)
 
-            patterns = self.store.get_patterns_by_tool(tool_name, limit=3)
+            # task_family is the retrieval key: at the pre-LLM hook it is derived from
+            # the user's message; at the pre-tool hook it is the tool name.
+            family = tool_name or "general"
+            task_fingerprint(family, args=args, session_id=task_id)
+
+            patterns = self.store.get_patterns_by_tool(family, limit=3)
             if not patterns:
                 return None
 
+            best = patterns[0]
             return {
-                "strategy_id": patterns[0].get("strategy_id", "unknown"),
-                "strategy_name": patterns[0].get("strategy_name", "unknown"),
-                "success_rate": patterns[0].get("confidence", 0.0),
-                "evidence_count": patterns[0].get("evidence_count", 0),
+                "strategy_id": best.get("strategy_id", "unknown"),
+                "strategy_name": best.get("strategy_name", "unknown"),
+                "success_rate": best.get("success_rate", best.get("confidence", 0.0)),
+                "evidence_count": best.get("evidence_count", 0),
+                "confidence": best.get("confidence", 0.0),
+                "status": best.get("status", "unknown"),
                 "directive": {
                     "action": "continue",
-                    "hint": f"Previous similar calls to {tool_name} succeeded with "
-                            f"{patterns[0].get('strategy_name', 'the first strategy')}. "
-                            f"Review evidence: {patterns[0].get('evidence_count', 0)} examples.",
+                    "hint": f"Previous similar calls to {family} succeeded with "
+                            f"'{best.get('strategy_name', 'the first strategy')}' "
+                            f"(success rate {best.get('success_rate', 0.0):.0%} over "
+                            f"{best.get('evidence_count', 0)} examples). "
+                            f"Review evidence: {best.get('evidence_count', 0)} examples.",
                 },
             }
 
         except Exception as e:
             log.warning("EBTTO retrieval error: %s", e)
             return None
+
+    @staticmethod
+    def _derive_task_family(user_message: str) -> str:
+        """Derive a coarse task family from the user's message.
+
+        Deliberately conservative: a short keyword map that buckets the request so
+        retrieval is task-scoped rather than replaying every stored strategy. Falls
+        back to ``general`` so an unrecognised request never retrieves unrelated
+        experience.
+        """
+        text = (user_message or "").lower()
+        if not text.strip():
+            return "general"
+        keywords = {
+            "file_edit": ("overwrite", "edit", "write file", "update file", "modify",
+                          "create file", "save"),
+            "file_read": ("read", "open", "show me", "inspect", "cat ", "view"),
+            "shell": ("run", "execute", "command", "terminal", "shell", "install",
+                      "npm", "pip", "git "),
+            "search": ("search", "find", "grep", "look for", "locate"),
+            "test": ("test", "pytest", "spec", "assert"),
+            "web": ("fetch", "download", "url", "http", "api", "website"),
+        }
+        for family, words in keywords.items():
+            if any(w in text for w in words):
+                return family
+        return "general"
 
     def _apply_strategy_to_args(self, tool_name: str, args: Dict[str, Any],
                                 guidance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
