@@ -556,17 +556,33 @@ class Store:
     # ---- outcomes --------------------------------------------------
 
     def record_outcome(self, outcome: ev.Outcome) -> str:
-        self._execute(
-            """INSERT INTO outcomes
-               (outcome_id, task_id, turn_id, result, confidence, evidence,
-                recorded_at)
-               VALUES (:outcome_id, :task_id, :turn_id, :result, :confidence,
-                       :evidence, :recorded_at)""",
-            {
-                **ev.event_to_dict(outcome),
-                "evidence": self._json(outcome.evidence),
-            },
-        )
+        # `tool_call_id` is the correlation key to the pre-tool tool_call row
+        # (the two hooks generate independent task ids). The column only
+        # exists after migration 5; a pre-5 database must keep working, so
+        # the write degrades to the base columns when it is missing.
+        cols = ("outcome_id, task_id, turn_id, result, confidence, evidence, "
+                "recorded_at")
+        params = {
+            **ev.event_to_dict(outcome),
+            "evidence": self._json(outcome.evidence),
+        }
+        try:
+            self._execute(
+                """INSERT INTO outcomes
+                   (outcome_id, task_id, turn_id, result, confidence, evidence,
+                    recorded_at, tool_call_id)
+                   VALUES (:outcome_id, :task_id, :turn_id, :result, :confidence,
+                           :evidence, :recorded_at, :tool_call_id)""",
+                {**params, "tool_call_id": getattr(outcome, "tool_call_id", "") or ""},
+            )
+        except sqlite3.OperationalError:
+            # pre-migration-5 database: correlation column absent
+            self._execute(
+                f"INSERT INTO outcomes ({cols}) "
+                "VALUES (:outcome_id, :task_id, :turn_id, :result, :confidence, "
+                ":evidence, :recorded_at)",
+                params,
+            )
         return outcome.event_id
 
     # ---- errors --------------------------------------------------

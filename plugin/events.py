@@ -138,6 +138,12 @@ class Outcome:
     """Outcome of a turn, recorded by the success detector.
 
     Supports ``SUCCESS | FAILURE | PARTIAL | UNCERTAIN`` plus evidence.
+
+    ``tool_call_id`` links the outcome to the exact tool invocation it
+    describes. The pre-tool recorder and the post-tool recorder generate
+    INDEPENDENT task ids (verified on the live schema: their task_id
+    intersection is 0), so tool_call_id is the only reliable correlation
+    between the two hooks.
     """
 
     schema_version: int = field(default=TASK_SCHEMA_VERSION, init=False, repr=False)
@@ -150,6 +156,7 @@ class Outcome:
     evidence: Dict[str, Any] = field(default_factory=dict)
     recorded_at: str = field(default_factory=_utcnow_iso, init=False, repr=False)
     recorded_at_epoch_ms: int = field(default_factory=_utcnow_epoch_ms, init=False, repr=False)
+    tool_call_id: str = ""  # correlation to the pre-tool tool_call row
 
 
 @dataclass(frozen=True)

@@ -490,6 +490,7 @@ class EBTTOPlugin:
                     confidence=0.90,
                     evidence={"tool": tool_name, "status": status,
                               "result": self._safe_text(result_str)[:500]},
+                    tool_call_id=tool_call_id,
                 )
                 self.store.record_outcome(outcome)
 

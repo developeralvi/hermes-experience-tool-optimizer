@@ -3,6 +3,11 @@
 Loopback-only (127.0.0.1), stdlib-only, read-only. Serves a static single-page
 UI from ``assets/`` plus a small JSON API under ``/api/`` that delegates to
 :mod:`hermes_ebtto.dashboard.queries`. No mutating endpoint exists.
+
+Connection lifecycle: every request opens its own read-only connection and
+closes it in a ``finally`` — on success, exception, or client disconnect.
+The module retains no reference to connections; ``queries._FLAGS`` cannot
+grow with request count because ``queries.close_conn`` removes the flag.
 """
 
 from __future__ import annotations
@@ -42,6 +47,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: object) -> None:
         # Keep the terminal clean; the CLI prints the URL and Ctrl+C stops.
+        # Never log request content — arguments and task text stay out of
+        # server diagnostics.
         pass
 
     def _conn(self):
@@ -50,9 +57,28 @@ class _Handler(BaseHTTPRequestHandler):
     def _query(self) -> dict:
         return {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
 
+    def _host_ok(self) -> bool:
+        """Accept only the loopback hostnames a local browser would send."""
+        host = (self.headers.get("Host") or "").strip()
+        if not host:
+            return False
+        if host in ("127.0.0.1", "localhost"):
+            return True
+        # "<host>:<port>" form — any port, host must be loopback
+        try:
+            name, _, port = host.rpartition(":")
+            if name in ("127.0.0.1", "localhost") and port.isdigit():
+                return True
+        except ValueError:
+            pass
+        return False
+
     # -- routing -----------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib name)
+        if not self._host_ok():
+            _json_response(self, 403, {"error": "host not allowed"})
+            return
         path = urlparse(self.path).path
         try:
             if path.startswith("/api/"):
@@ -89,7 +115,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _api(self, path: str) -> None:
         q = self._query()
-        with self._conn() as conn:
+        conn = self._conn()
+        try:
             if path == "/api/overview":
                 _json_response(self, 200, queries.overview(conn, q.get("window", "24h")))
             elif path == "/api/tool_calls":
@@ -133,6 +160,10 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, 200, queries.system_status(conn, self.db_path))
             else:
                 _json_response(self, 404, {"error": "unknown endpoint"})
+        finally:
+            # Explicit close on EVERY path — success, exception, or client
+            # disconnect. Never rely on GC to release the fd.
+            queries.close_conn(conn)
 
 
 def find_free_port(start: int = DEFAULT_PORT, tries: int = 20) -> int:
@@ -152,7 +183,9 @@ def serve(*, port: int = 0, db_path: str = "", open_browser: bool = True) -> int
     if port <= 0:
         port = find_free_port()
     _Handler.db_path = db_path
+    # Bind explicitly to the loopback address — never 0.0.0.0.
     httpd = ThreadingHTTPServer((HOST, port), _Handler)
+    httpd.daemon_threads = True
     url = f"http://{HOST}:{port}/"
     print(f"EBTTO dashboard (read-only) listening on {url}")
     print(f"Database: {queries.resolve_db_path(db_path)}")

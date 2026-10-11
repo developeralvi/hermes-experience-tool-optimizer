@@ -12,7 +12,10 @@ name is ever taken from a request.
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
+import weakref
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,6 +25,40 @@ from hermes_ebtto.storage import DEFAULT_DB_NAME, get_storage_path
 MAX_PAGE_SIZE = 200
 DEFAULT_PAGE_SIZE = 50
 
+# Column allowlists for detail queries. Never SELECT * — the tables contain
+# raw_args (unsanitized arguments) which must never leave this module.
+_TOOL_CALL_DETAIL_COLS = (
+    "tool_call_id", "task_id", "turn_id", "tool_name", "sanitized_args",
+    "result_status", "duration_ms", "order_number", "attempt_number",
+    "error_class", "error_message", "classified", "classified_class",
+    "classifier_version", "created_at",
+)
+_OUTCOME_DETAIL_COLS = (
+    "outcome_id", "task_id", "turn_id", "result", "confidence", "recorded_at",
+)
+_ERROR_DETAIL_COLS = (
+    "error_id", "task_id", "turn_id", "tool_call_id", "tool_name",
+    "error_class", "confidence", "error_message", "created_at",
+)
+# Columns whose content may contain user-controlled text; any value from
+# these is passed through privacy redaction before display so historical
+# rows that predate sanitization cannot leak credentials.
+_SENSITIVE_TEXT_COLS = (
+    "sanitized_args", "error_message", "sanitized_intent", "strategy_name",
+    "pattern_name", "evidence", "task_fingerprint", "instruction", "intent",
+    "raw_args",
+)
+
+# Secret-shaped tokens the canonical privacy layer does not mask in-place
+# (its regexes target *embedded* fragments inside longer prose). A bare key
+# stored in a JSON args field is exactly this case, so withhold it.
+_SECRET_SHAPE_RE = re.compile(
+    r"\b(sk-[A-Za-z0-9_-]{8,}|sk_live_[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{20,}"
+    r"|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)\b"
+)
+
 _TIME_WINDOWS = {
     "1h": "-1 hour",
     "24h": "-1 day",
@@ -29,6 +66,13 @@ _TIME_WINDOWS = {
     "30d": "-30 days",
     "all": None,
 }
+
+# Capability flags are computed per call rather than cached: sqlite3.Connection
+# rejects attribute assignment AND cannot be weak-referenced, so any
+# module-level registry either leaks entries (id-keyed, never cleaned when a
+# caller closes the connection directly) or is impossible (weak). Both
+# capability checks below are trivial in-memory catalog queries, so caching
+# bought nothing — the registry is gone and cannot grow with request count.
 
 
 class DashboardError(Exception):
@@ -72,6 +116,20 @@ def open_ro(db_path: Optional[str] = None) -> sqlite3.Connection:
     return conn
 
 
+def close_conn(conn: sqlite3.Connection) -> None:
+    """Close a connection and drop its capability flag.
+
+    The caller MUST use this (or ``with conn:`` followed by ``close_conn``)
+    — the module never retains a strong reference to a connection, so the
+    flag map cannot grow unboundedly. Safe to call on an already-closed
+    connection; never raises.
+    """
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+
 def _assert_schema(conn: sqlite3.Connection) -> None:
     """Fail loudly (not silently) on an incompatible/missing schema."""
     have = {
@@ -89,25 +147,93 @@ def _assert_schema(conn: sqlite3.Connection) -> None:
         )
     # retrieval_guidance_events arrived in schema v4; older DBs are still
     # valid, the dashboard reports the telemetry as unavailable.
-    _set_flag(conn, "has_guidance_telemetry", "retrieval_guidance_events" in have)
-
-
-def _set_flag(conn: sqlite3.Connection, name: str, value: bool) -> None:
-    """Attach a capability flag to a connection (sqlite3.Connection forbids
-    attribute assignment; keep the mapping in this module)."""
-    _FLAGS[id(conn)] = value
-    _FLAG_OWNER.setdefault(id(conn), conn)
+    # outcomes.tool_call_id (the per-call correlation key) arrived in v5.
+    # A pre-v5 database cannot correlate outcomes to tool calls, so every
+    # outcome is UNKNOWN rather than misattributed — reported honestly.
+    # (Capabilities are queried on demand by the helpers below; nothing is
+    # cached on the connection, which cannot hold custom attributes.)
 
 
 def has_guidance_telemetry(conn: sqlite3.Connection) -> bool:
     """True when the connection points at a schema-v4+ database."""
-    return bool(_FLAGS.get(id(conn), False))
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='retrieval_guidance_events'").fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
 
 
-# connection -> capability flag map (module-level because sqlite3.Connection
-# objects do not accept custom attributes)
-_FLAGS: dict = {}
-_FLAG_OWNER: dict = {}
+def has_outcome_correlation(conn: sqlite3.Connection) -> bool:
+    """True when outcomes carry tool_call_id (schema v5+).
+
+    On a pre-v5 database the dashboard cannot link an outcome to its tool
+    call, so every outcome is UNKNOWN — never guessed from session-level
+    success. The UI states this limitation explicitly.
+    """
+    try:
+        return any(r[1] == "tool_call_id"
+                   for r in conn.execute("PRAGMA table_info(outcomes)"))
+    except sqlite3.Error:
+        return False
+
+
+def _redact_text(value: Any) -> Any:
+    """Redact credentials from a text column before display.
+
+    New rows are sanitized at write time, but historical rows may not be —
+    the redaction is applied at read time too, so pre-sanitization data can
+    never leak through the API even if it contains a live secret.
+
+    Falls back through two layers (whole-string redaction, embedded-fragment
+    masking). If either changes the text, the result is safe; if neither
+    does, a secret-SHAPED value (bare API key / JWT / AWS key / private-key
+    header) is withheld entirely rather than risked, and ordinary text passes
+    through untouched.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        from hermes_ebtto import privacy as pr
+
+        for candidate in (pr.redact_str(value), pr.redact(value, mode="masked")):
+            if candidate != value:
+                return candidate
+        # Nothing changed: the canonical layer does not recognize this
+        # content as a secret. A bare key stored in an args field is the one
+        # remaining case, so withhold only secret-SHAPED values.
+        if _SECRET_SHAPE_RE.search(value):
+            return "[REDACTED]"
+        return value
+    except Exception:
+        # Redaction failure must not fail the page — but we also must not
+        # return potentially-raw content.
+        return "[REDACTED: sanitization unavailable]"
+
+
+def _safe_rows(cur: sqlite3.Cursor) -> List[Dict[str, Any]]:
+    """Fetch rows and redact sensitive text columns."""
+    rows = _rows(cur)
+    for row in rows:
+        for col in _SENSITIVE_TEXT_COLS:
+            if col in row:
+                row[col] = _redact_text(row[col])
+    return rows
+
+
+def _redact_text_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Redact the sensitive text columns of a single row.
+
+    Identifier columns (task_id, turn_id, tool_call_id, *_id) are NEVER
+    redacted — they are uuids/uuid-like ids the UI needs for correlation,
+    not user text. Only the free-text columns in ``_SENSITIVE_TEXT_COLS``
+    are passed through privacy redaction.
+    """
+    for col in _SENSITIVE_TEXT_COLS:
+        if col in row:
+            row[col] = _redact_text(row[col])
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -150,39 +276,95 @@ def _clamp_page(page: Any, page_size: Any) -> Tuple[int, int]:
 # Page A — Overview
 # ---------------------------------------------------------------------------
 
-def _succeeded_sql() -> str:
-    """SQL predicate for a successful tool call.
+def _correlated_status_sql(alias: str = "tool_calls") -> str:
+    """Per-call outcome classification.
 
-    The production schema records pre-tool rows with ``result_status =
-    'PENDING'`` and writes the true outcome to the ``outcomes`` table. The
-    two writers assign INDEPENDENT task ids (pre-tool generates its own via
-    the recorder; post-tool uses the session-scoped kwargs task_id), so the
-    only reliable linkage is the session id embedded at the start of both
-    ``turn_id`` values (``<session>:<...>:<...>``). Success is therefore
-    judged as: the session of this tool call has any SUCCESS outcome.
-    ``result_status IN ('ok','success')`` remains as a fallback for
-    synthetic/direct writes (e.g. tests).
+    Returns SQL CASE yielding 'success' / 'failure' / 'unknown':
+    * success  — the outcome row correlated by tool_call_id says SUCCESS
+    * failure  — correlated outcome says FAILURE, or (synthetic writes only)
+                 result_status is a failure marker
+    * unknown  — no correlated outcome and no definitive status
+
+    Session-level or task-level outcomes NEVER leak in: every branch keys on
+    the tool call's own tool_call_id. Verified by regression tests with
+    multiple calls and mixed outcomes in one session.
+
+    NOTE: callers on a pre-migration-5 database (outcomes has no
+    tool_call_id column) must use :func:`_uncorrelated_status_sql` instead —
+    SQLite validates the column reference at COMPILE time, so a CASE cannot
+    guard it at runtime.
+    """
+    a = alias
+    return (
+        "CASE "
+        f" WHEN (SELECT o.result FROM outcomes o "
+        f"       WHERE o.tool_call_id = {a}.tool_call_id "
+        f"       ORDER BY o.recorded_at DESC LIMIT 1) = 'SUCCESS' THEN 'success' "
+        f" WHEN (SELECT o.result FROM outcomes o "
+        f"       WHERE o.tool_call_id = {a}.tool_call_id "
+        f"       ORDER BY o.recorded_at DESC LIMIT 1) = 'FAILURE' THEN 'failure' "
+        f" WHEN {a}.result_status IN ('error', 'failed', 'failure') THEN 'failure' "
+        f" WHEN {a}.result_status IN ('ok', 'success') THEN 'success' "
+        " ELSE 'unknown' "
+        "END"
+    )
+
+
+def _uncorrelated_status_sql(alias: str = "tool_calls") -> str:
+    """Pre-migration-5 fallback: everything is UNKNOWN.
+
+    A database whose outcomes table has no tool_call_id column cannot
+    correlate an outcome to its tool call. The honest result is UNKNOWN for
+    every row — never a session-level guess, never a misattributed success.
     """
     return (
-        "(EXISTS (SELECT 1 FROM outcomes o "
-        " WHERE substr(o.turn_id, 1, instr(o.turn_id, ':') - 1) = "
-        "       substr(tool_calls.turn_id, 1, instr(tool_calls.turn_id, ':') - 1) "
-        "   AND o.result = 'SUCCESS') "
-        " OR tool_calls.result_status IN ('ok','success'))"
+        f"CASE WHEN {alias}.result_status IN ('ok', 'success') THEN 'success' "
+        f"WHEN {alias}.result_status IN ('error', 'failed', 'failure') "
+        f"THEN 'failure' ELSE 'unknown' END"
+    )
+
+
+def status_sql(conn: Optional[sqlite3.Connection] = None,
+               alias: str = "tool_calls") -> str:
+    """Per-call outcome classification, database-aware.
+
+    Uses tool_call_id correlation when the schema supports it (v5+); on a
+    pre-v5 database it degrades to result_status-only classification with
+    everything else UNKNOWN, so no outcome is ever misattributed.
+    """
+    if conn is not None and not has_outcome_correlation(conn):
+        return _uncorrelated_status_sql(alias)
+    return _correlated_status_sql(alias)
+
+
+def _outcome_counts_sql(status_expr: str, alias: str = "tool_calls",
+                        *, with_window: bool = True) -> str:
+    """Counted per-call classification for one session/window.
+
+    ``status_expr`` comes from :func:`status_sql` (database-aware) — the
+    caller passes it so the pre-v5 fallback and the v5 correlation use the
+    same code path.
+    """
+    where = "WHERE created_at >= datetime('now', ?)" if with_window else ""
+    return (
+        f"SELECT COUNT(*) AS total, "
+        f"SUM(CASE WHEN {status_expr} = 'success' THEN 1 ELSE 0 END) AS succeeded, "
+        f"SUM(CASE WHEN {status_expr} = 'failure' THEN 1 ELSE 0 END) AS failed, "
+        f"SUM(CASE WHEN {status_expr} = 'unknown' THEN 1 ELSE 0 END) AS unknown "
+        f"FROM tool_calls {alias} {where}"
     )
 
 
 def overview(conn: sqlite3.Connection, window: str = "24h") -> Dict[str, Any]:
     w = _parse_window(window)
     where, params = _time_clause(w)
-    ok_pred = _succeeded_sql()
 
-    total = int(conn.execute(f"SELECT COUNT(*) FROM tool_calls {where}", params).fetchone()[0])
-    succeeded = int(conn.execute(
-        f"SELECT COUNT(*) FROM tool_calls {where} {'AND' if where else 'WHERE'} {ok_pred}",
-        params,
-    ).fetchone()[0])
-    failed = total - succeeded
+    total, succeeded, failed, unknown = 0, 0, 0, 0
+    row = conn.execute(_outcome_counts_sql(status_sql(conn),
+                                           with_window=bool(where)),
+                       params if where else []).fetchone()
+    if row:
+        total, succeeded, failed, unknown = (row[0] or 0), (row[1] or 0), (row[2] or 0), (row[3] or 0)
 
     patterns = int(conn.execute("SELECT COUNT(*) FROM patterns").fetchone()[0])
     strategies = int(conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0])
@@ -215,8 +397,9 @@ def overview(conn: sqlite3.Connection, window: str = "24h") -> Dict[str, Any]:
     trend = _rows(
         conn.execute(
             """SELECT date(created_at) AS day,
-                      SUM(CASE WHEN """ + _succeeded_sql() + """ THEN 1 ELSE 0 END) AS ok,
-                      SUM(CASE WHEN """ + _succeeded_sql() + """ THEN 0 ELSE 1 END) AS fail
+                      SUM(CASE WHEN """ + status_sql(conn) + """ = 'success' THEN 1 ELSE 0 END) AS ok,
+                      SUM(CASE WHEN """ + status_sql(conn) + """ = 'failure' THEN 1 ELSE 0 END) AS fail,
+                      SUM(CASE WHEN """ + status_sql(conn) + """ = 'unknown' THEN 1 ELSE 0 END) AS unknown
                  FROM tool_calls
                 WHERE created_at >= datetime('now', '-14 days')
                 GROUP BY day ORDER BY day"""
@@ -226,8 +409,9 @@ def overview(conn: sqlite3.Connection, window: str = "24h") -> Dict[str, Any]:
         conn.execute(
             f"""SELECT tool_name,
                        COUNT(*) AS calls,
-                       SUM(CASE WHEN {ok_pred} THEN 1 ELSE 0 END) AS ok,
-                       SUM(CASE WHEN {ok_pred} THEN 0 ELSE 1 END) AS fail
+                       SUM(CASE WHEN {status_sql(conn)} = 'success' THEN 1 ELSE 0 END) AS ok,
+                       SUM(CASE WHEN {status_sql(conn)} = 'failure' THEN 1 ELSE 0 END) AS fail,
+                       SUM(CASE WHEN {status_sql(conn)} = 'unknown' THEN 1 ELSE 0 END) AS unknown
                   FROM tool_calls {where}
                  GROUP BY tool_name ORDER BY calls DESC LIMIT 10""",
             params,
@@ -240,10 +424,19 @@ def overview(conn: sqlite3.Connection, window: str = "24h") -> Dict[str, Any]:
     except sqlite3.Error:
         pass
 
+    known = succeeded + failed
     return {
         "window": w,
-        "tool_calls": {"total": total, "succeeded": succeeded, "failed": failed},
-        "success_rate": (succeeded / total) if total else None,
+        "tool_calls": {
+            "total": total,
+            "succeeded": succeeded,
+            "failed": failed,
+            "unknown": unknown,
+        },
+        # The success rate denominator EXCLUDES unknowns (per requirement);
+        # it is None when nothing is known rather than a false 0%/100%.
+        "success_rate": (succeeded / known) if known else None,
+        "known_outcomes": known,
         "tasks_total": tasks,
         "patterns": patterns,
         "strategies": {"total": strategies, "qualified": qualified},
@@ -279,9 +472,9 @@ def tool_calls(
         clauses.append("created_at >= datetime('now', ?)")
         params.append(mod)
     if status == "success":
-        clauses.append(_succeeded_sql())
+        clauses.append(f"{status_sql(conn)} = 'success'")
     elif status == "failure":
-        clauses.append(f"NOT {_succeeded_sql()}")
+        clauses.append(f"{status_sql(conn)} = 'failure'")
     if tool:
         clauses.append("tool_name = ?")
         params.append(tool[:100])
@@ -298,12 +491,13 @@ def tool_calls(
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     total = int(conn.execute(f"SELECT COUNT(*) FROM tool_calls {where}", params).fetchone()[0])
-    rows = _rows(
+    rows = _safe_rows(
         conn.execute(
-            f"""SELECT tool_call_id, task_id, turn_id, tool_name, result_status,
-                       duration_ms, attempt_number, error_class, error_message,
-                       classified_class, created_at
-                  FROM tool_calls {where}
+            f"""SELECT tool_call_id, task_id, turn_id, tool_name, sanitized_args,
+                      result_status, duration_ms, attempt_number, error_class,
+                      error_message, classified_class, created_at,
+                      {status_sql(conn)} AS outcome
+                 FROM tool_calls {where}
                  ORDER BY created_at DESC, tool_call_id DESC
                  LIMIT ? OFFSET ?""",
             params + [ps, (p - 1) * ps],
@@ -314,32 +508,61 @@ def tool_calls(
 
 
 def tool_call_detail(conn: sqlite3.Connection, tool_call_id: str) -> Optional[Dict[str, Any]]:
+    # Explicit column allowlist — never SELECT * (raw_args must not leave).
+    cols = ", ".join(_TOOL_CALL_DETAIL_COLS)
     row = conn.execute(
-        """SELECT * FROM tool_calls WHERE tool_call_id = ?""", (tool_call_id,)
+        f"SELECT {cols} FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)
     ).fetchone()
     if not row:
         return None
     d = dict(row)
-    d["outcomes"] = _rows(
+    d = _redact_text_row(dict(row))
+    # Correlate the outcome by tool_call_id ONLY — the two writers assign
+    # independent task ids, so a task_id join here would show unrelated rows.
+    # Pre-migration-5 outcomes have no tool_call_id column: the honest result
+    # is "not reliably linked", never a session-level substitute.
+    if has_outcome_correlation(conn):
+        d["outcomes"] = _safe_rows(
+            conn.execute(
+                "SELECT " + ", ".join(_OUTCOME_DETAIL_COLS) +
+                " FROM outcomes WHERE tool_call_id = ?", (tool_call_id,)
+            )
+        )
+    else:
+        d["outcomes"] = []
+    d["outcome_correlation"] = (
+        "correlated by tool_call_id"
+        if d["outcomes"] else
+        "Outcome not reliably linked to this tool call "
+        "(database predates migration 5 — no tool_call_id on outcomes)"
+    )
+    d["errors"] = _safe_rows(
         conn.execute(
-            "SELECT * FROM outcomes WHERE task_id = ?", (d["task_id"],)
+            "SELECT " + ", ".join(_ERROR_DETAIL_COLS) +
+            " FROM errors WHERE tool_call_id = ?", (tool_call_id,)
         )
     )
-    d["errors"] = _rows(
-        conn.execute(
-            "SELECT * FROM errors WHERE tool_call_id = ?", (tool_call_id,)
-        )
-    )
-    d["attempts"] = _rows(
-        conn.execute(
-            """SELECT tool_call_id, attempt_number, result_status, duration_ms,
-                      error_class, created_at
+    # attempts: same task AND tool, correlated by tool_call_id family.
+    # The pre-tool rows share the recorder task_id; the "related attempt"
+    # notion is only meaningful within that task (never cross-session).
+    # attempts share the pre-tool recorder's task_id; their outcome column
+    # is only queryable when the schema supports tool_call_id correlation.
+    if has_outcome_correlation(conn):
+        attempts_sql = """SELECT tool_call_id, attempt_number, result_status,
+                      duration_ms, error_class, created_at,
+                      (SELECT o.result FROM outcomes o
+                        WHERE o.tool_call_id = tool_calls.tool_call_id
+                        ORDER BY o.recorded_at DESC LIMIT 1) AS outcome
                  FROM tool_calls
-                WHERE task_id = ? AND tool_name = ?
-                ORDER BY attempt_number""",
-            (d["task_id"], d["tool_name"]),
-        )
-    )
+                WHERE task_id = ?
+                ORDER BY attempt_number, created_at"""
+    else:
+        attempts_sql = """SELECT tool_call_id, attempt_number, result_status,
+                      duration_ms, error_class, created_at, 'unknown' AS outcome
+                 FROM tool_calls
+                WHERE task_id = ?
+                ORDER BY attempt_number, created_at"""
+    d["attempts"] = _rows(conn.execute(attempts_sql, (d["task_id"],)))
     return d
 
 
@@ -361,16 +584,17 @@ def failures(
     total = int(
         conn.execute(
             f"SELECT COUNT(*) FROM tool_calls {where} {'AND' if where else 'WHERE'} "
-            f"NOT {_succeeded_sql()}",
+            f"{status_sql(conn)} = 'failure'",
             params,
         ).fetchone()[0]
     )
-    rows = _rows(
+    rows = _safe_rows(
         conn.execute(
-            f"""SELECT tool_call_id, task_id, tool_name, result_status,
-                      error_class, error_message, attempt_number, created_at
+            f"""SELECT tool_call_id, task_id, turn_id, tool_name, result_status,
+                      error_class, error_message, attempt_number, created_at,
+                      {status_sql(conn)} AS outcome
                  FROM tool_calls {where} {'AND' if where else 'WHERE'}
-                 NOT {_succeeded_sql()}
+                 {status_sql(conn)} = 'failure'
                 ORDER BY created_at DESC LIMIT ? OFFSET ?""",
             params + [ps, (p - 1) * ps],
         )
@@ -380,26 +604,27 @@ def failures(
             f"""SELECT COALESCE(classified_class, error_class, 'unclassified') AS cls,
                       COUNT(*) AS n
                  FROM tool_calls {where} {'AND' if where else 'WHERE'}
-                 NOT {_succeeded_sql()}
+                 {status_sql(conn)} = 'failure'
                 GROUP BY cls ORDER BY n DESC LIMIT 20""",
             params,
         )
     )
-    # recovery = a task that had a failure and later a success on the same tool
-    # (success judged against the outcomes table, matching _succeeded_sql)
+    # recovery = a task that had a failure and later a success ON THE SAME
+    # tool call id — session/task-level success is NOT accepted (that would
+    # credit unrelated calls).
     recoveries = _rows(
         conn.execute(
-            "SELECT f.task_id, f.tool_name, "
-            "MIN(f.created_at) AS failed_at, "
-            "(SELECT MIN(s.created_at) FROM tool_calls s "
-            "  WHERE s.task_id = f.task_id AND s.tool_name = f.tool_name "
-            "    AND s.result_status IN ('ok','success') "
-            "    AND s.created_at > MIN(f.created_at)) AS recovered_at "
-            "FROM tool_calls f "
-            "WHERE NOT " + _succeeded_sql().replace("tool_calls.", "f.") + " "
-            "GROUP BY f.task_id, f.tool_name "
-            "HAVING recovered_at IS NOT NULL "
-            "ORDER BY failed_at DESC LIMIT 20"
+            f"""SELECT f.tool_call_id, f.task_id, f.tool_name,
+                      MIN(f.created_at) AS failed_at,
+                      (SELECT MIN(s.created_at) FROM tool_calls s
+                        WHERE s.tool_call_id = f.tool_call_id
+                          AND {status_sql(conn, 's')} = 'success'
+                          AND s.created_at > MIN(f.created_at)) AS recovered_at
+                 FROM tool_calls f
+                WHERE {status_sql(conn, 'f')} = 'failure'
+                GROUP BY f.tool_call_id, f.task_id, f.tool_name
+                HAVING recovered_at IS NOT NULL
+                ORDER BY failed_at DESC LIMIT 20"""
         )
     )
     return {"rows": rows, "total": total, "page": p, "page_size": ps,
@@ -414,39 +639,66 @@ def task_timeline(conn: sqlite3.Connection, task_id: str) -> Optional[Dict[str, 
     task = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     if not task:
         return None
-    calls = _rows(
-        conn.execute(
-            """SELECT tool_call_id, tool_name, result_status, attempt_number,
-                      duration_ms, error_class, classified_class, created_at
+    if has_outcome_correlation(conn):
+        calls_sql = """SELECT tool_call_id, tool_name, result_status,
+                      attempt_number, duration_ms, error_class, classified_class,
+                      created_at,
+                      (SELECT o.result FROM outcomes o
+                        WHERE o.tool_call_id = tool_calls.tool_call_id
+                        ORDER BY o.recorded_at DESC LIMIT 1) AS outcome
                  FROM tool_calls WHERE task_id = ?
-                ORDER BY created_at, attempt_number""",
-            (task_id,),
+                ORDER BY created_at, attempt_number"""
+    else:
+        calls_sql = """SELECT tool_call_id, tool_name, result_status,
+                      attempt_number, duration_ms, error_class, classified_class,
+                      created_at, 'unknown' AS outcome
+                 FROM tool_calls WHERE task_id = ?
+                ORDER BY created_at, attempt_number"""
+    calls = _rows(conn.execute(calls_sql, (task_id,)))
+    # outcomes: correlate by tool_call_id — the pre-tool writer's task_id is
+    # independent from the post-tool writer's task_id (verified: 0 task_id
+    # overlap on the live DB), so a task_id join here would attribute
+    # unrelated session outcomes to this trajectory.
+    if has_outcome_correlation(conn):
+        oc = _safe_rows(
+            conn.execute(
+                """SELECT o.outcome_id, o.task_id, o.turn_id, o.result,
+                          o.confidence, o.recorded_at, o.tool_call_id
+                     FROM outcomes o
+                     WHERE o.tool_call_id IN (
+                         SELECT tool_call_id FROM tool_calls WHERE task_id = ?)
+                     ORDER BY o.recorded_at""",
+                (task_id,),
+            )
         )
-    )
-    outcomes = _rows(
+    else:
+        oc = []   # pre-v5: correlation impossible — report missing, never fake
+    for o in oc:
+        o["correlated"] = True  # by construction: tool_call_id join
+    errors = _safe_rows(
         conn.execute(
-            "SELECT * FROM outcomes WHERE task_id = ? ORDER BY recorded_at", (task_id,)
-        )
-    )
-    errors = _rows(
-        conn.execute(
-            "SELECT * FROM errors WHERE task_id = ? ORDER BY created_at", (task_id,)
+            "SELECT error_id, task_id, tool_call_id, tool_name, error_class, "
+            "error_message, created_at FROM errors "
+            "WHERE task_id = ? OR tool_call_id IN "
+            "(SELECT tool_call_id FROM tool_calls WHERE task_id = ?) "
+            "ORDER BY created_at",
+            (task_id, task_id),
         )
     )
     events = []
     for c in calls:
         events.append({"stage": "tool_call", "at": c["created_at"], "data": c})
-    for o in outcomes:
+    for o in oc:
         events.append({"stage": "outcome", "at": o["recorded_at"], "data": o})
     for e in errors:
         events.append({"stage": "error", "at": e["created_at"], "data": e})
     events.sort(key=lambda e: e["at"] or "")
     missing = []
-    if not outcomes:
-        missing.append("post-tool outcomes (none persisted for this task)")
+    if not oc:
+        missing.append("post-tool outcomes (none correlated by tool_call_id)")
     if not errors:
         missing.append("classified failures (none — all calls succeeded or unclassified)")
-    return {"task": dict(task), "events": events, "missing_stages": missing}
+    return {"task": _redact_text_row(dict(task)), "events": events, "missing_stages": missing}
 
 
 def tasks(
@@ -471,7 +723,7 @@ def tasks(
         params.extend([like, like, like])
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     total = int(conn.execute(f"SELECT COUNT(*) FROM tasks {where}", params).fetchone()[0])
-    rows = _rows(
+    rows = _safe_rows(
         conn.execute(
             f"""SELECT task_id, task_family, sanitized_intent, provider, model, created_at
                   FROM tasks {where}
@@ -511,7 +763,7 @@ def strategies(
         params.extend([like, like])
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     total = int(conn.execute(f"SELECT COUNT(*) FROM strategies {where}", params).fetchone()[0])
-    rows = _rows(
+    rows = _safe_rows(
         conn.execute(
             f"""SELECT strategy_id, strategy_name, strategy_type, task_family,
                       evidence_count, success_count, failure_count, context_count,
@@ -529,11 +781,14 @@ def strategies(
 
 def strategy_detail(conn: sqlite3.Connection, strategy_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute(
-        "SELECT * FROM strategies WHERE strategy_id = ?", (strategy_id,)
+        "SELECT strategy_id, strategy_name, strategy_type, task_family, "
+        "evidence_count, success_count, failure_count, context_count, "
+        "confidence, status, scope, version, created_at, last_validated_at, "
+        "last_used_at FROM strategies WHERE strategy_id = ?", (strategy_id,)
     ).fetchone()
     if not row:
         return None
-    d = dict(row)
+    d = _redact_text_row(dict(row))
     # Evidence: the outcomes whose tool matches this strategy's task_family.
     d["evidence_sample"] = _rows(
         conn.execute(
@@ -566,7 +821,7 @@ def patterns(
 ) -> Dict[str, Any]:
     p, ps = _clamp_page(page, page_size)
     total = int(conn.execute("SELECT COUNT(*) FROM patterns").fetchone()[0])
-    rows = _rows(
+    rows = _safe_rows(
         conn.execute(
             """SELECT pattern_id, pattern_name, pattern_type, evidence_count,
                       success_count, failure_count, confidence, status, created_at,
@@ -609,7 +864,7 @@ def guidance_events(
             f"SELECT COUNT(*) FROM retrieval_guidance_events {where}", params
         ).fetchone()[0]
     )
-    rows = _rows(
+    rows = _safe_rows(
         conn.execute(
             f"""SELECT guidance_id, task_id, task_fingerprint, hook,
                       candidate_count, qualified_count, selected_strategy_id,
@@ -628,9 +883,14 @@ def guidance_events(
 # ---------------------------------------------------------------------------
 
 def evaluations(conn: sqlite3.Connection, limit: int = 50) -> List[Dict[str, Any]]:
-    return _rows(
+    return _safe_rows(
         conn.execute(
-            """SELECT * FROM evaluations ORDER BY recorded_at DESC LIMIT ?""",
+            """SELECT evaluation_id, benchmark, category,
+                      baseline_first_success, baseline_avg_calls,
+                      baseline_avg_retries, ebt_to_first_success,
+                      ebt_avg_calls, ebt_avg_retries, improvement_points,
+                      recorded_at
+                 FROM evaluations ORDER BY recorded_at DESC LIMIT ?""",
             (min(limit, MAX_PAGE_SIZE),),
         )
     )

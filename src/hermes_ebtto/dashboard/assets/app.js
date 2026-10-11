@@ -79,8 +79,8 @@ async function renderOverview() {
   };
   const tc = d.tool_calls;
   add("Tool calls", tc.total, "window: " + d.window);
-  add("Success rate", pct(d.success_rate),
-      tc.total ? `${tc.succeeded} ok / ${tc.failed} failed` : "no data in window");
+  add("Success rate", d.success_rate == null ? "n/a" : pct(d.success_rate),
+      tc.total ? `${tc.succeeded} ok / ${tc.failed} failed / ${tc.unknown} unknown (rate excludes unknown)` : "no data in window");
   add("Tasks", d.tasks_total, "all time");
   add("Patterns", d.patterns, "");
   add("Strategies", d.strategies.total,
@@ -100,18 +100,17 @@ async function renderOverview() {
 
   // success/failure trend (14d)
   if (d.failure_trend_14d && d.failure_trend_14d.length) {
-    const h = el("h3", null, "Success / failure — last 14 days");
+    const h = el("h3", null, "Success / failure / unknown — last 14 days");
     const t = el("table");
-    t.append(el("thead"));
     const thead = el("thead");
     const trh = el("tr");
-    ["day", "ok", "fail"].forEach((x) => trh.append(el("th", null, x)));
+    ["day", "ok", "fail", "unknown"].forEach((x) => trh.append(el("th", null, x)));
     thead.append(trh); t.append(thead);
     const tb = el("tbody");
     for (const r of d.failure_trend_14d) {
       const tr = el("tr");
       tr.append(el("td", null, r.day), el("td", null, String(r.ok)),
-                el("td", null, String(r.fail)));
+                el("td", null, String(r.fail)), el("td", null, String(r.unknown)));
       tb.append(tr);
     }
     t.append(tb);
@@ -123,7 +122,7 @@ async function renderOverview() {
     const h = el("h3", null, "Most used tools (window)");
     const t = el("table");
     const thead = el("thead"); const trh = el("tr");
-    ["tool", "calls", "ok", "fail", "failure rate"].forEach((x) => trh.append(el("th", null, x)));
+    ["tool", "calls", "ok", "fail", "unknown", "failure rate"].forEach((x) => trh.append(el("th", null, x)));
     thead.append(trh); t.append(thead);
     const tb = el("tbody");
     for (const r of d.top_tools) {
@@ -134,6 +133,7 @@ async function renderOverview() {
         sessionStorage.setItem("tool_filter", r.tool_name); render(); };
       tr.append(el("td").appendChild(link).parentNode, el("td", null, String(r.calls)),
                 el("td", null, String(r.ok)), el("td", null, String(r.fail)),
+                el("td", null, String(r.unknown)),
                 el("td", null, r.calls ? ((r.fail / r.calls) * 100).toFixed(1) + "%" : "—"));
       tb.append(tr);
     }
@@ -192,9 +192,10 @@ async function renderToolCalls() {
     const link = el("a", null, r.tool_name); link.href = "#";
     link.onclick = (e) => { e.preventDefault(); state.detail = { type: "tool", id: r.tool_call_id }; renderDetail(); };
     tdTool.append(link);
-    const okSt = ["ok", "success"].includes(r.result_status);
+    // outcome column: success / failure / unknown from the correlated row
+    const outcome = r.outcome || "unknown";
     tr.append(el("td", null, fmtTime(r.created_at)), tdTool,
-      el("td").appendChild(badge(okSt, r.result_status || "?")).parentNode,
+      el("td").appendChild(badge(outcome === "success", outcome.toUpperCase())).parentNode,
       el("td", null, fmtDur(r.duration_ms)), el("td", null, String(r.attempt_number ?? "—")),
       el("td", null, r.classified_class || r.error_class || "—"),
       el("td", null, r.task_id || "—"));
@@ -240,7 +241,7 @@ async function renderDetail() {
       view.append(cards);
       const det = el("details");
       const sum = el("summary", null, "sanitized arguments");
-      det.append(sum, el("pre", null, JSON.stringify(d.sanitized_args || d.raw_args, null, 2)));
+      det.append(sum, el("pre", null, d.sanitized_args ? JSON.stringify(d.sanitized_args, null, 2) : "No sanitized arguments recorded (raw arguments are never exposed)."));
       view.append(det);
       if (d.error_message) {
         const de = el("details"); de.append(el("summary", null, "error message (sanitized)"), el("pre", null, esc(d.error_message)));
@@ -252,12 +253,15 @@ async function renderDetail() {
         for (const a of d.attempts) {
           const tr = el("tr");
           tr.append(el("td", null, String(a.attempt_number)),
-            el("td").appendChild(badge(["ok","success"].includes(a.result_status), a.result_status)).parentNode,
+            el("td", null, a.result_status || "PENDING"),
             el("td", null, fmtDur(a.duration_ms)), el("td", null, a.error_class || "—"),
             el("td", null, fmtTime(a.created_at)));
           t.append(tr);
         }
         view.append(t);
+      }
+      if (d.outcome_correlation) {
+        view.append(el("p", null, "Outcome linkage: " + d.outcome_correlation));
       }
     } else if (type === "task") {
       const d = await api("task", { id });
@@ -283,7 +287,13 @@ async function renderDetail() {
         const tr = el("tr");
         let detail = "";
         if (e.stage === "tool_call") detail = `${e.data.tool_name} — ${e.data.result_status}`;
-        else if (e.stage === "outcome") detail = `${e.data.result} (confidence ${e.data.confidence})`;
+        else if (e.stage === "outcome") {
+          // an outcome only appears when it is correlated by tool_call_id;
+          // correlated=false means the linkage could not be proven.
+          detail = e.data.correlated === false
+            ? "Outcome not reliably linked to this tool call"
+            : `${e.data.result} (confidence ${e.data.confidence})`;
+        }
         else if (e.stage === "error") detail = `${e.data.error_class}: ${e.data.error_message || ""}`;
         tr.append(el("td", null, e.stage), el("td", null, fmtTime(e.at)), el("td", null, detail));
         tb.append(tr);
@@ -358,13 +368,13 @@ async function renderFailures() {
     view.append(t);
   }
   if (d.recoveries && d.recoveries.length) {
-    view.append(el("h3", null, "Failed then recovered (same task + tool)"));
+    view.append(el("h3", null, "Failed then recovered (same tool call id)"));
     const t = el("table");
     for (const r of d.recoveries) {
       const tr = el("tr");
-      const link = el("a", null, r.task_id); link.href = "#";
-      link.onclick = (ev) => { ev.preventDefault(); state.detail = { type: "task", id: r.task_id }; renderDetail(); };
-      tr.append(el("td").appendChild(link).parentNode, el("td", null, r.tool_name),
+      const link = el("a", null, r.tool_call_id); link.href = "#";
+      link.onclick = (ev) => { ev.preventDefault(); state.detail = { type: "tool", id: r.tool_call_id }; renderDetail(); };
+      tr.append(el("td").appendChild(link).parentNode, el("td", null, r.task_id), el("td", null, r.tool_name),
         el("td", null, fmtTime(r.failed_at)), el("td", null, fmtTime(r.recovered_at)));
       t.append(tr);
     }
