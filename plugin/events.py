@@ -37,6 +37,7 @@ METRIC_SCHEMA_VERSION = 1
 # Primitive builders
 # ---------------------------------------------------------------------------
 
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -208,6 +209,7 @@ class Trajectory:
 # Fingerprint helpers
 # ---------------------------------------------------------------------------
 
+
 def normalize_path(value: Any) -> str:
     """Deterministic, secret-safe path normalization.
 
@@ -251,11 +253,7 @@ def fingerprint_task(  # noqa: PLR0913
     profile: Optional[str] = None,
 ) -> str:
     """Stable task fingerprint combining task family + context."""
-    ctx = "+".join(
-        str(v)
-        for v in (model, provider, workspace_identifier, profile)
-        if v
-    )
+    ctx = "+".join(str(v) for v in (model, provider, workspace_identifier, profile) if v)
     return f"{task_fingerprint}|{ctx}" if ctx else task_fingerprint
 
 
@@ -267,6 +265,7 @@ def fingerprint_strategy(sequence: List[str]) -> str:
 # ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------
+
 
 def build_task(*, task_fingerprint: str, task_family: str, **overrides) -> Task:
     task = Task(task_fingerprint=task_fingerprint, task_family=task_family)
@@ -310,6 +309,7 @@ def build_tool_call(
 # Serialization
 # ---------------------------------------------------------------------------
 
+
 def event_to_dict(obj: Any) -> Dict[str, Any]:
     """Serialize a dataclass to a plain dict for DB insertion / JSON export."""
     return asdict(obj)
@@ -341,4 +341,6 @@ def dict_to_event(schema_version: int, data: Dict[str, Any]) -> Any:
         return Outcome(**data)
     elif "error_id" in data:
         return Error(**data)
-    raise ValueError(f"unknown event type: {data.get('task_fingerprint', data.get('tool_call_id'))}")
+    raise ValueError(
+        f"unknown event type: {data.get('task_fingerprint', data.get('tool_call_id'))}"
+    )

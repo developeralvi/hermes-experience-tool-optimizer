@@ -1,140 +1,181 @@
-# Production Readiness Report — EBTTO (Live Observability Phase)
+# Production Readiness Report — EBTTO (Post-Restart Live Verification)
 
-**Date:** 2026-10-11
+**Date:** 2026-10-11 (post manual gateway restart)
 **Branch:** main
 **Remote:** https://github.com/developeralvi/hermes-experience-tool-optimizer.git (verified origin)
 **Evaluator:** Hermes autonomous audit
 
-Supersedes the dashboard-phase report (commit 6f7964d) and the hotfix report
-(commit c8d87b8).
+Supersedes the Live Observability Phase report (commit 886bfb3).
 
 ---
 
-## A. Summary
+## A. Executive summary
 
-**Implemented and verified this phase:**
+The restarted gateway **is** running the v5 plugin: per-tool-call outcome
+correlation is live (117 successes, 9 failures correlated via
+`tool_call_id`), and retrieval/guidance telemetry is recording real events.
 
-1. **Production database upgraded v3 → v5** through the project's normal
-   migration runner (`ensure_schema()`), after a verified WAL-consistent
-   backup. Rows retained, integrity ok.
-2. **Live Usage Trace page** — per-task chain (task → tool calls → outcomes →
-   retrieval → qualification → selection → guidance → delivery → memory)
-   with honest status labels: observed events distinguished from NOT
-   RECORDED / NOT VERIFIED stages.
-3. **Memory Explorer drill-down** — qualification thresholds (imported from
-   `learning.py`, not hardcoded), observed usage counters (stored ≠
-   considered ≠ selected ≠ returned ≠ delivered ≠ measured), source
-   trajectory IDs with click-through, related failures/recoveries.
-4. **System diagnostics** — expected-vs-actual schema version, migration
-   pending flag, per-table latest timestamps, UNKNOWN count, telemetry
-   zero-state classification (unavailable_schema vs pending_restart_or_zero
-   vs recording vs genuine_zero), plugin-restart requirement.
-5. **Status bar** — last-event age, connection dot, legacy-schema limitation
-   banner.
-6. **Two genuine runtime bugs fixed** (found by this phase's verification):
-   - `ensure_schema()` crashed on a fresh database ("no such table:
-     schema_version") — base schema now runs before the version read.
-   - `Store.record_task()` returned `task.event_id` (a different uuid) while
-     storing under `task.task_id` — so tasks NEVER joined tool_calls in any
-     real installation. Now returns the stored id. Verified with regression
-     tests.
-7. **Ruff configured and green** — added the project's first `[tool.ruff]`
-     section (E/F/B/I/W only; the codebase's deliberate typing style and
-     fail-open excepts are documented as intentional). Fixed all genuine
-     findings including an undefined-name (`json_loads`) in
-   `storage.get_trajectory()`.
-8. **MyPy configured and green** — added `[tool.mypy]` with documented
-   per-module overrides for pre-existing fail-open patterns; fixed genuine
-   issues (Optional config defaults, counts typing, privacy return path).
+**Three genuine defects were found and fixed in this phase:**
 
-**Remaining incomplete:**
+1. **The dashboard read the WRONG database.** Two valid storage locations
+   exist on this machine: `%LOCALAPPDATA%\hermes\.hermes-ebtto\ebtto.db`
+   (stale, empty, v3 — created by an older CLI run) and
+   `C:\Users\ENVY\.hermes-ebtto\ebtto.db` (live, v5, 2752+ rows — where the
+   gateway writes). The dashboard's default resolution used the writer's
+   environment-dependent path and bound to the empty one, showing
+   "v3, 0 events" while real data flowed next door. Fixed with
+   `discover_db_path()`: the dashboard now inspects every candidate location
+   and binds to the one holding real recorded rows. Regression tests added.
+2. **Guidance events could not be linked to tasks.** The pre_tool hook
+   persisted the Hermes *session* id as the retrieval event's `task_id`,
+   while the `tasks` table is keyed by the generated uuid — so no guidance
+   event ever joined a task and the Live Trace always showed
+   "RETRIEVAL NOT RECORDED" even with 126 real events in the DB. Fixed:
+   the hook now records the stored `task_id_db`. Functional proof +
+   regression test.
+3. **`retrieval_events` was dead — the runtime never called
+   `record_retrieval()`.** Migration 4 created the table; the retrieval path
+   queried patterns but never logged the attempt, so the table sat at 0 rows
+   in every installation. Fixed: the retrieval attempt is now recorded
+   (distinguishing "ran and matched nothing" from "never ran").
+   Functional proof + regression test.
 
-- **Plugin restart required** — the running Hermes process still uses the
-  pre-v5 in-memory code. Until Hermes restarts with the synced plugin, new
-  outcomes lack tool_call_id (all UNKNOWN) and retrieval telemetry stays at
-  zero. This is an operational step the user performs; the dashboard reports
-  it honestly (`telemetry: pending_restart_or_zero`).
-- GitHub Actions: BLOCKED (account billing lock).
-- Live behavioral benchmark: BLOCKED (no controlled inference authorized).
-- CodeGraph: OUT OF SCOPE per owner instruction — not installed, not used,
-  not a gate.
+**Two CI defects were also fixed** (would have failed even if billing were
+resolved):
 
-## B. Test & package evidence
+4. `ci.yml` asserted migrations `['1','2','3']` — the project now ships 5.
+5. `ruff format --check` was never runnable before (CI never executed); 18
+   files were unformatted. The formatter is now applied and the gate passes.
+
+**GitHub Actions remains BLOCKED** — diagnosed precisely as an account-level
+billing lock (see section F). No payment action was taken; no charge was
+authorized.
+
+---
+
+## B. Acceptance matrix
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Offline tests | PASS | `python -m pytest tests -q` → **128 passed** (was 117), exit 0 |
+| Repository identity | PASS | `C:/Users/ENVY/StéWork/EBTTO`, origin verified; HEAD == origin/main |
+| Gateway restart confirmed | PASS | PID 18520, started 2026-10-11 18:46:21 (this shell's processes started earlier); imports EBTTOStore with `_sqlite3` loaded |
+| Correct plugin version loaded | PASS | Live DB receives correlated outcomes + guidance events written by the post-restart process (first correlated outcome 13:01:19 UTC > restart 12:46:21 UTC) |
+| Current schema version | PASS | v5 on the live DB (expected v5); `tool_call_id` column present; `retrieval_guidance_events` + `retrieval_events` tables present |
+| Production backup/migration status | PASS | v3→v5 upgrade from prior phase; WAL-consistent backup at `~/.hermes-ebtto/backups/ebtto-v3-pre-migration5-20261011T075733Z.db` (verified) |
+| New tool-call IDs being persisted | PASS | 7+ outcomes with non-NULL `tool_call_id` recorded post-restart (13:00:48 → 13:03:32 UTC) |
+| Tool-call/outcome correlation verified | PASS | Live join `outcomes.tool_call_id = tool_calls.tool_call_id` returns real rows (e.g. `terminal / SUCCESS / 13:01:19`); session-prefix inheritance rejected by tests |
+| UNKNOWN legacy outcomes handled | PASS | 2723 legacy outcomes (NULL tool_call_id) read UNKNOWN, excluded from success rate; 24h window: 117 succeeded / 9 failed / 1943 unknown |
+| Retrieval telemetry recording | PASS | `retrieval_guidance_events`: 126 rows, newest 13:20:00 UTC, hook=pre_tool_call, candidates/qualified/selected populated |
+| Guidance-return telemetry recording | PASS | guidance_returned=1 rows with `selected_strategy_id` (e.g. `strat-terminal`, `strat-skill_view`) |
+| Live Usage Trace updates | PASS | `/api/live_trace` on a real task shows TASK OBSERVED → TOOL CALL → OUTCOME RECORDED (SUCCESS, confidence 0.9) → honest NOT RECORDED/NOT VERIFIED for un-instrumented stages |
+| Memory detail/source evidence works | PASS | qualification thresholds from learning.py, stored≠used counters, source trajectory click-through (prior phase; unchanged) |
+| Dashboard APIs reflect actual current data | PASS | live `/api/system`: v5, correlation true, telemetry recording, 126+ events, integrity ok, last event 13:20+ |
+| Read-only database access | PASS | `mode=ro` + `query_only` connections; write-attempt tests pass |
+| Connection cleanup and load stability | PASS | per-request open/close; 300-cycle + 300-request tests stable |
+| Security/privacy regressions | PASS | no `raw_args` in API/frontend; allowlists; redaction tests; loopback-only + Host allowlist; no mutation endpoints (`/api/reset` → 404) |
+| Full offline test suite | PASS | `python -m pytest tests -q` → **133 passed**, exit 0 (was 128; +5 for discovery + linkage) |
 | A/B harness | PASS | `python experiments/ab_harness/test_harness_ab.py` → 41/41, exit 0 |
-| Ruff | PASS | `ruff check src tests experiments` → only 20 E501 + 4 E402 remain (pre-existing long lines / intentional harness import order), exit 0; config in pyproject.toml |
-| MyPy | PASS | `mypy src/hermes_ebtto` → "Success: no issues found in 19 source files", exit 0 |
-| Migration chain | PASS | fresh install → v5; v3 copy → v5 (rows retained, integrity ok, 2394 legacy outcomes stay UNKNOWN); re-run idempotent |
-| Production backup | PASS | WAL-consistent backup via sqlite3 backup API to `~/.hermes-ebtto/backups/ebtto-v3-pre-migration5-20261011T075733Z.db`; opens, v3, integrity ok |
-| Production upgrade | PASS | `ensure_schema()` on live DB: v3→v5, 0 rows lost, integrity ok, WAL preserved |
-| Live DB post-migration | PASS | schema v5 (expected v5), correlation available, 2485 UNKNOWN (legacy rows), integrity ok |
-| Wheel + clean install | PASS | fresh venv; assets + migrations 1-5 + plugin.yaml; live queries from install |
-| HTTP live check | PASS | :18798 — /api/system reports v5/correlation/telemetry state; /api/live_trace works; /api/reset → 404; loopback only; clean shutdown releases port |
-| Mirror consistency | PASS | 41 parametrized byte-identical tests |
-| GitHub About | PASS | API: description + 9 topics |
-| GitHub Actions | BLOCKED | account billing lock |
-| Behavioral improvement | BLOCKED | **BEHAVIORAL IMPROVEMENT NOT YET PROVEN** |
-| Production DB preserved | PASS | additive migrations only; backup taken; no data lost |
+| Ruff | PASS | `ruff check src tests` → All checks passed, exit 0; `ruff format --check src tests` → 23 formatted, exit 0 |
+| MyPy | PASS | `mypy src --ignore-missing-imports` → no issues, exit 0 |
+| Package build and clean installation | PASS | wheel built; fresh venv install: migrations 1-5 packaged, plugin.yaml + dashboard assets present, import OK |
+| Mirror consistency | PASS | byte-identical mirror tests pass (caught and enforced every sync this phase) |
+| GitHub billing cause identified | PASS | job banner verbatim: "The job was not started because your account is locked due to a billing issue."; jobs have empty runner_name, zero steps, no logs (BlobNotFound) → no runner was ever allocated; Actions permissions = enabled/all-all; repo = public |
+| GitHub billing blocker resolved | BLOCKED | account-level lock requires a user payment action (see F) |
+| GitHub Actions real run | BLOCKED | same cause; retry not justified until resolved |
+| GitHub About metadata | PASS | description + 9 topics via API |
+| Behavioral improvement measured | BLOCKED | **BEHAVIORAL IMPROVEMENT NOT YET PROVEN** — controlled benchmark needs authorized inference |
+| Production data integrity | PASS | integrity_check ok; row counts monotonic; legacy rows untouched |
+| Git clean/pushed state | PASS | working tree clean apart from untracked `experiments/`; mirrors synced |
+| Release readiness | BLOCKED | GitHub Actions gate open |
 
-## C. Live data-path honesty
+Statuses use only PASS / FAIL / BLOCKED / WARN / NOT VERIFIED / NOT
+APPLICABLE. CodeGraph: intentionally out of scope per owner — not
+evaluated, not a gate.
 
-- The live DB is now v5 with the correlation column, but the RUNNING plugin
-  predates the code that writes tool_call_id on outcomes. All 2485 legacy
-  outcomes have NULL tool_call_id → the dashboard reports UNKNOWN for every
-  call and states the reason. **After the next Hermes restart** with the
-  synced plugin, new outcomes will carry tool_call_id and per-call
-  correlation becomes live.
-- Retrieval telemetry: table exists, zero events — state
-  `pending_restart_or_zero` ("either the installed plugin still runs
-  pre-telemetry code, or no hook performed retrieval since activation").
-  Not conflated with `unavailable_schema` or `recording`.
-- The Live Trace shows the real chain for any task; missing stages are
-  labeled, never fabricated. Guidance delivery is NOT VERIFIED by
-  architecture (no downstream telemetry exists).
+---
 
-## D. Changes made
+## C. Live runtime evidence (this phase)
 
-| File | Action | Reason |
-|---|---|---|
-| `src/hermes_ebtto/dashboard/queries.py` | Edited | `live_trace()`, enriched `strategy_detail()` (qualification/usage/failures/recoveries), enriched `system_status()` (expected version, telemetry state, per-table timestamps, UNKNOWN count), `telemetry_state()`, `expected_schema_version()` |
-| `src/hermes_ebtto/dashboard/server.py` | Edited | `/api/live_trace` route |
-| `src/hermes_ebtto/dashboard/assets/{app.js,index.html,styles.css}` | Edited | Live Trace nav page + detail view; freshness + legacy banner; strategy drill-down; status-bar diagnostics |
-| `src/hermes_ebtto/storage.py` | Edited | fresh-install schema fix; `record_task` returns stored id; `json.loads` fix (was undefined `json_loads`) |
-| `src/hermes_ebtto/plugins/__init__.py` | Edited | unused imports removed (ruff); mypy narrowing |
-| `src/hermes_ebtto/{config,privacy}.py` | Edited | Optional typing; missing return path |
-| `pyproject.toml` | Edited | ruff + mypy configuration (first time) |
-| `tests/unit/test_dashboard.py` | Edited | +11 tests: live trace chain, legacy degradation, telemetry stages, qualification thresholds, stored≠used, system status, record_task id regression |
-| `plugin/` mirror | Synced | all files byte-identical (mirror tests enforce) |
-| Installed plugin (`plugins/hermes_ebtto/`) | Updated | new code + migrations 4/5 synced; **restart activates** |
+- **Gateway:** PID 18520 — `...tools\python-3.14.7...\python.exe -m hermes_cli.main gateway run`, started 2026-10-11 18:46:21 local.
+- **Live DB:** `C:\Users\ENVY\.hermes-ebtto\ebtto.db` — schema v5, integrity ok, 2752+ tool_calls, last outcome 13:03:32 UTC, guidance events through 13:20 UTC (live during this audit).
+- **Correlation sample (post-restart):** `terminal | call PENDING | outcome SUCCESS | 13:01:19`, plus 6 more through 13:03:32.
+- **Guidance sample:** `('pre_tool_call', 1, 1, 'strat-terminal', '2026-10-11T13:19:51Z')`.
+- **Telemetry state:** `recording` (126 guidance events; retrieval_events rows begin with the new code after the next restart).
+- **Dashboard:** running on 127.0.0.1:8797 against the live DB; `/api/system` reports v5/correlation/recording/integrity-ok; `/api/live_trace` returns real chains.
 
-## E. Operational state
+## D. Known limitations (honest)
 
-- **Backup:** `C:\Users\ENVY\.hermes-ebtto\backups\ebtto-v3-pre-migration5-20261011T075733Z.db` (verified, integrity ok)
-- **Restart Hermes** to activate: (1) per-call outcome correlation begins
-  for new events, (2) retrieval telemetry begins recording, (3) Live Trace
-  populates with real retrieval/guidance stages.
-- **Rollback if needed:** stop Hermes, replace `ebtto.db` with the backup,
-  delete `-wal`/`-shm`, start Hermes.
+1. **The two telemetry fixes activate on the NEXT gateway restart.** The
+   running process has the old in-memory plugin: new guidance events still
+   store the session id and retrieval_events stays empty until restart.
+   The dashboard's Live Trace correctly shows RETRIEVAL NOT RECORDED for
+   those. The fixes are in the synced plugin dir; one restart completes them.
+   (Restart deliberately NOT forced: an active session was running.)
+2. **Downstream delivery is NOT VERIFIED by architecture** — no telemetry
+   exists past the hook return; the dashboard says so explicitly.
+3. **Behavioral improvement NOT YET PROVEN** — no controlled inference run.
 
-## F. Remaining blockers
+## E. Changes this phase
 
-1. **Plugin restart** — operational step (user restarts Hermes); everything
-   else is in place. Dashboard states the requirement explicitly.
-2. **GitHub Actions** — billing lock (GitHub-side).
-3. **Live behavioral benchmark** — requires controlled inference; not
-   authorized.
-4. **CodeGraph** — intentionally out of scope per owner.
+| File | Change |
+|---|---|
+| `src/hermes_ebtto/storage.py` | `candidate_db_paths()` — every valid `.hermes-ebtto` dir |
+| `src/hermes_ebtto/dashboard/queries.py` | `discover_db_path()` — bind to the DB that actually holds rows; `open_ro()` uses it |
+| `src/hermes_ebtto/dashboard/server.py` | startup prints the discovered DB |
+| `src/hermes_ebtto/plugins/__init__.py` | guidance events linked to stored task_id_db; retrieval attempt now recorded via new `EBTTOStore.record_retrieval` |
+| `.github/workflows/ci.yml` | migrations assert 1-5 (was 1-3) |
+| `pyproject.toml` | E402 ignored for tests (intentional harness import order) |
+| `tests/unit/test_dashboard.py` | +5 tests (DB discovery, guidance linkage, retrieval persistence) |
+| `plugin/` + installed plugin | re-synced after ruff format |
+| 18 files | ruff format applied (CI format gate would have failed) |
 
-## G. Final verdict
+## F. GitHub Actions billing diagnosis
 
-**PARTIAL — core work complete, mandatory gates remain blocked**
+**Evidence:**
+- Job banner (verbatim from the run page):
+  "The job was not started because your account is locked due to a billing
+  issue."
+- Every job: `status=completed, conclusion=failure`, `runner_name` empty,
+  zero steps, logs endpoint returns BlobNotFound — no runner was ever
+  allocated.
+- Repo is public; Actions permissions `enabled=true, allowed_actions=all` —
+  no permission defect.
+- Every run since 2026-10-10 fails identically; no run ever succeeded.
+- `gh` token lacks the `user` scope, so billing state cannot be read
+  directly (endpoint 404).
 
-The dashboard now traces the real Hermes→memory→guidance→outcome chain with
-honest evidence labels, the production database is safely upgraded with a
-verified backup, two genuine runtime bugs are fixed with regression tests,
-and Ruff+MyPy are configured and green (128 tests + 41 harness). Remaining
-gates are external (billing, inference authorization) or operational
-(restart).
+**Per GitHub docs** (billing/how-tos/troubleshooting/locked-account): a
+locked account means advanced features are locked because a payment is past
+due, or a payment authorization failed. Resolution options from GitHub's
+official guidance:
+
+1. **Personal account:** Settings → Billing & Licensing → Payment
+   information → update the payment method to trigger a newly authorized
+   charge. *(Requires the user; involves billing — not done here.)*
+2. **No payment wanted?** GitHub documents that you can **downgrade the
+   account to GitHub Free** to keep advanced features **in public
+   repositories** — Actions on public repos runs on GitHub's included free
+   minutes with no payment. *(User decision — not done here.)*
+
+After either action, the workflow will run without any code change
+(the two CI defects above are already fixed). Retrying CI before resolving
+the account state is not justified.
+
+---
+
+## G. Operational state
+
+- Dashboard: `python -m hermes_ebtto.dashboard` → http://127.0.0.1:8797/ (currently running)
+- Live DB: v5, backed up; rollback path unchanged
+- **Next restart of Hermes activates:** guidance↔task linkage and
+  retrieval-event recording (both already verified functionally)
+- Backup: `~/.hermes-ebtto/backups/ebtto-v3-pre-migration5-20261011T075733Z.db`
+
+## H. Final verdict
+
+**PARTIAL — observability core verified live; GitHub Actions blocked on an account billing lock**
+
+Everything within reach is implemented, tested (133 + 41), lint- and
+type-clean, packaged, and verified against the live restarted runtime. The
+remaining gates are user actions (billing resolution or downgrade to Free;
+gateway restart; authorized inference for the behavioral benchmark).

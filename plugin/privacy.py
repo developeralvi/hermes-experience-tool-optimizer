@@ -64,7 +64,9 @@ OAUTH_CLIENT_SECRET_RE = re.compile(r"\b([A-Za-z0-9_\-]{20,})\b", re.I)
 JWT_RE = re.compile(r"\b[A-Za-z0-9\-_]{20,}\.[A-Za-z0-9\-_]{20,}\.[A-Za-z0-9\-_]{20,}\b")
 
 # Connection strings
-CONN_STRING_RE = re.compile(r"\b(password|passwd|pwd|secret|token|access_token|api_key|apikey)\s*=\s*[^\s]+", re.I)
+CONN_STRING_RE = re.compile(
+    r"\b(password|passwd|pwd|secret|token|access_token|api_key|apikey)\s*=\s*[^\s]+", re.I
+)
 
 # SendGrid / other
 SENDGRID_RE = re.compile(r"\bSG\.[A-Za-z0-9\-_]{20,}\.[A-Za-z0-9\-_]{20,}\b")
@@ -90,6 +92,7 @@ def _mask(value: str, hide: int = 4) -> str:
 # ---------------------------------------------------------------------------
 # Generic redactor
 # ---------------------------------------------------------------------------
+
 
 def redact(text: str, mode: str = "redacted") -> str:
     """Redact secrets OUT OF TEXT (e.g. error messages, evidence strings)."""
@@ -117,8 +120,8 @@ def redact(text: str, mode: str = "redacted") -> str:
 # Dict / payload redactor
 # ---------------------------------------------------------------------------
 
-def redact_dict(obj: Any, *, mode: str = "redacted",
-                private_fields: Optional[set] = None) -> Any:
+
+def redact_dict(obj: Any, *, mode: str = "redacted", private_fields: Optional[set] = None) -> Any:
     """Redact secrets from a dict / list / scalar, preserving structure.
 
     ``private_fields`` is an optional explicit allowlist of keys the caller
@@ -150,17 +153,33 @@ def redact_dict(obj: Any, *, mode: str = "redacted",
                 out[k] = v
         return out
     if isinstance(obj, list):
-        return [redact_dict(v, mode=mode, private_fields=private_fields)
-                for v in obj]
+        return [redact_dict(v, mode=mode, private_fields=private_fields) for v in obj]
     return obj
 
 
 def _looks_private_key(key: str) -> bool:
     return any(key.startswith(p) for p in ENV_PREFIX) or key in {
-        "authorization", "auth", "cookie", "cookie_value", "session_token",
-        "x_api_key", "api-key", "secret", "password", "passwd", "pwd",
-        "access_token", "refresh_token", "bearer", "token", "apiKey",
-        "apikey", "private_key", "privatekey", "key", "id_rsa",
+        "authorization",
+        "auth",
+        "cookie",
+        "cookie_value",
+        "session_token",
+        "x_api_key",
+        "api-key",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "access_token",
+        "refresh_token",
+        "bearer",
+        "token",
+        "apiKey",
+        "apikey",
+        "private_key",
+        "privatekey",
+        "key",
+        "id_rsa",
     }
 
 
@@ -228,6 +247,7 @@ def _looks_secret_like(text: str) -> bool:
 # Environment-dump redactor
 # ---------------------------------------------------------------------------
 
+
 def redact_env(env: Dict[str, Any], *, mode: str = "redacted") -> Dict[str, Any]:
     """Redact a flat env/dump dict."""
     out: Dict[str, Any] = {}
@@ -244,6 +264,7 @@ def redact_env(env: Dict[str, Any], *, mode: str = "redacted") -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
+
 
 def sanitize_payload(obj: Any, *, mode: str = "redacted") -> Any:
     """Sanitize any payload for storage. Delegates to redact_dict."""

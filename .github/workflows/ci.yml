@@ -74,7 +74,7 @@ jobs:
           assert callable(p.register), 'module-level register(ctx) missing'
           assert hermes_ebtto.__version__ == '0.1.0'
           from hermes_ebtto.storage import MIGRATIONS_DIR
-          assert sorted(f.stem for f in MIGRATIONS_DIR.glob('*.sql')) == ['1', '2', '3'], 'migrations missing from installed package'
+          assert sorted(f.stem for f in MIGRATIONS_DIR.glob('*.sql')) == ['1', '2', '3', '4', '5'], 'migrations missing from installed package'
           print('import + register + migrations OK')
           "
 

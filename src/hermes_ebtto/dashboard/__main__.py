@@ -15,20 +15,21 @@ def main(argv=None) -> int:
         prog="ebtto dashboard",
         description="Start the read-only EBTTO dashboard (loopback only).",
     )
-    parser.add_argument("--port", type=int, default=0,
-                        help="port (0 = first free port from 8797)")
-    parser.add_argument("--db", default="",
-                        help="EBTTO database path or directory "
-                             "(default: $HERMES_HOME/.hermes-ebtto/ebtto.db)")
-    parser.add_argument("--no-browser", action="store_true",
-                        help="print the URL but do not open a browser")
+    parser.add_argument("--port", type=int, default=0, help="port (0 = first free port from 8797)")
+    parser.add_argument(
+        "--db",
+        default="",
+        help="EBTTO database path or directory (default: $HERMES_HOME/.hermes-ebtto/ebtto.db)",
+    )
+    parser.add_argument(
+        "--no-browser", action="store_true", help="print the URL but do not open a browser"
+    )
     args = parser.parse_args(argv)
 
     from hermes_ebtto.dashboard import server
 
     try:
-        server.serve(port=args.port, db_path=args.db,
-                     open_browser=not args.no_browser)
+        server.serve(port=args.port, db_path=args.db, open_browser=not args.no_browser)
     except OSError as exc:
         print(f"ebtto dashboard: cannot start server: {exc}", file=sys.stderr)
         return 1

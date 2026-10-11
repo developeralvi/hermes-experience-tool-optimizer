@@ -120,43 +120,95 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/overview":
                 _json_response(self, 200, queries.overview(conn, q.get("window", "24h")))
             elif path == "/api/tool_calls":
-                _json_response(self, 200, queries.tool_calls(
-                    conn, status=q.get("status"), tool=q.get("tool"),
-                    window=q.get("window", "24h"), search=q.get("q"),
-                    task_id=q.get("task_id"), page=q.get("page"),
-                    page_size=q.get("page_size")))
+                _json_response(
+                    self,
+                    200,
+                    queries.tool_calls(
+                        conn,
+                        status=q.get("status"),
+                        tool=q.get("tool"),
+                        window=q.get("window", "24h"),
+                        search=q.get("q"),
+                        task_id=q.get("task_id"),
+                        page=q.get("page"),
+                        page_size=q.get("page_size"),
+                    ),
+                )
             elif path == "/api/tool_call":
-                _json_response(self, 200, queries.tool_call_detail(
-                    conn, q.get("id", "")) or {"error": "not found"})
+                _json_response(
+                    self,
+                    200,
+                    queries.tool_call_detail(conn, q.get("id", "")) or {"error": "not found"},
+                )
             elif path == "/api/failures":
-                _json_response(self, 200, queries.failures(
-                    conn, window=q.get("window", "24h"), page=q.get("page"),
-                    page_size=q.get("page_size")))
+                _json_response(
+                    self,
+                    200,
+                    queries.failures(
+                        conn,
+                        window=q.get("window", "24h"),
+                        page=q.get("page"),
+                        page_size=q.get("page_size"),
+                    ),
+                )
             elif path == "/api/tasks":
-                _json_response(self, 200, queries.tasks(
-                    conn, window=q.get("window", "24h"), search=q.get("q"),
-                    page=q.get("page"), page_size=q.get("page_size")))
+                _json_response(
+                    self,
+                    200,
+                    queries.tasks(
+                        conn,
+                        window=q.get("window", "24h"),
+                        search=q.get("q"),
+                        page=q.get("page"),
+                        page_size=q.get("page_size"),
+                    ),
+                )
             elif path == "/api/task":
-                _json_response(self, 200, queries.task_timeline(
-                    conn, q.get("id", "")) or {"error": "not found"})
+                _json_response(
+                    self,
+                    200,
+                    queries.task_timeline(conn, q.get("id", "")) or {"error": "not found"},
+                )
             elif path == "/api/live_trace":
-                _json_response(self, 200, queries.live_trace(
-                    conn, q.get("id", "")) or {"error": "not found"})
+                _json_response(
+                    self, 200, queries.live_trace(conn, q.get("id", "")) or {"error": "not found"}
+                )
             elif path == "/api/strategies":
-                _json_response(self, 200, queries.strategies(
-                    conn, status=q.get("status"), family=q.get("family"),
-                    search=q.get("q"), page=q.get("page"),
-                    page_size=q.get("page_size")))
+                _json_response(
+                    self,
+                    200,
+                    queries.strategies(
+                        conn,
+                        status=q.get("status"),
+                        family=q.get("family"),
+                        search=q.get("q"),
+                        page=q.get("page"),
+                        page_size=q.get("page_size"),
+                    ),
+                )
             elif path == "/api/strategy":
-                _json_response(self, 200, queries.strategy_detail(
-                    conn, q.get("id", "")) or {"error": "not found"})
+                _json_response(
+                    self,
+                    200,
+                    queries.strategy_detail(conn, q.get("id", "")) or {"error": "not found"},
+                )
             elif path == "/api/patterns":
-                _json_response(self, 200, queries.patterns(
-                    conn, page=q.get("page"), page_size=q.get("page_size")))
+                _json_response(
+                    self,
+                    200,
+                    queries.patterns(conn, page=q.get("page"), page_size=q.get("page_size")),
+                )
             elif path == "/api/guidance":
-                _json_response(self, 200, queries.guidance_events(
-                    conn, reason_code=q.get("reason"), page=q.get("page"),
-                    page_size=q.get("page_size")))
+                _json_response(
+                    self,
+                    200,
+                    queries.guidance_events(
+                        conn,
+                        reason_code=q.get("reason"),
+                        page=q.get("page"),
+                        page_size=q.get("page_size"),
+                    ),
+                )
             elif path == "/api/evaluations":
                 _json_response(self, 200, {"rows": queries.evaluations(conn)})
             elif path == "/api/system":
@@ -191,10 +243,12 @@ def serve(*, port: int = 0, db_path: str = "", open_browser: bool = True) -> int
     httpd.daemon_threads = True
     url = f"http://{HOST}:{port}/"
     print(f"EBTTO dashboard (read-only) listening on {url}")
-    print(f"Database: {queries.resolve_db_path(db_path)}")
+    db = queries.resolve_db_path(db_path) if db_path else queries.discover_db_path()
+    print(f"Database: {db}")
     print("Press Ctrl+C to stop.")
     if open_browser:
         import webbrowser
+
         webbrowser.open(url)
     try:
         httpd.serve_forever()

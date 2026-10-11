@@ -102,8 +102,7 @@ def _get_or_default(d: Dict[str, Any], *path: str, module_default: Any = None) -
     return curr if curr is not None else module_default
 
 
-def _get_def(d: Dict[str, Any], *path: str, module_default: Any = None,
-             default: Any = None) -> Any:
+def _get_def(d: Dict[str, Any], *path: str, module_default: Any = None, default: Any = None) -> Any:
     """Deep-get a nested dict path.
 
     If a key is missing at any level, return ``module_default`` when provided,
@@ -210,26 +209,35 @@ class EbttoConfig:
         }
 
     def __repr__(self) -> str:
-        return (f"EbttoConfig(enabled={self.enabled}, mode={self.mode!r}, "
-                f"retrieval={self.retrieval!r}, intervention={self.intervention!r}, "
-                f"learning={self.learning!r}, privacy={self.privacy!r})")
+        return (
+            f"EbttoConfig(enabled={self.enabled}, mode={self.mode!r}, "
+            f"retrieval={self.retrieval!r}, intervention={self.intervention!r}, "
+            f"learning={self.learning!r}, privacy={self.privacy!r})"
+        )
 
 
 def get_ebtto(config: Dict[str, Any]) -> "EbttoConfig":
     """Return a typed EbttoConfig from a raw config dict."""
     return EbttoConfig(
-        enabled=bool(_get_or_default(config, "ebtto", "enabled",
-                                     module_default=DEFAULTS["enabled"])),
-        mode=_get_or_default(config, "ebtto", "mode",
-                             module_default=DEFAULTS["mode"]),
-        storage=dict(_get_or_default(config, "ebtto", "storage",
-                                     module_default=DEFAULTS["storage"])),
-        retrieval=dict(_get_or_default(config, "ebtto", "retrieval",
-                                       module_default=DEFAULTS["retrieval"])),
-        intervention=dict(_get_or_default(config, "ebtto", "intervention",
-                                          module_default=DEFAULTS["intervention"])),
-        learning=dict(_get_or_default(config, "ebtto", "learning",
-                                      module_default=DEFAULTS["learning"])),
-        privacy=dict(_get_or_default(config, "ebtto", "privacy",
-                                     module_default=DEFAULTS["privacy"])),
+        enabled=bool(
+            _get_or_default(config, "ebtto", "enabled", module_default=DEFAULTS["enabled"])
+        ),
+        mode=_get_or_default(config, "ebtto", "mode", module_default=DEFAULTS["mode"]),
+        storage=dict(
+            _get_or_default(config, "ebtto", "storage", module_default=DEFAULTS["storage"])
+        ),
+        retrieval=dict(
+            _get_or_default(config, "ebtto", "retrieval", module_default=DEFAULTS["retrieval"])
+        ),
+        intervention=dict(
+            _get_or_default(
+                config, "ebtto", "intervention", module_default=DEFAULTS["intervention"]
+            )
+        ),
+        learning=dict(
+            _get_or_default(config, "ebtto", "learning", module_default=DEFAULTS["learning"])
+        ),
+        privacy=dict(
+            _get_or_default(config, "ebtto", "privacy", module_default=DEFAULTS["privacy"])
+        ),
     )

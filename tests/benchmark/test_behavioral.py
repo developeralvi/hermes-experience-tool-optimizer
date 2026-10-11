@@ -54,15 +54,13 @@ class FakeLookupService:
         if mode == "alternate":
             return {
                 "status": "SUCCESS",
-                "result": {"query": query, "mode": "alternate",
-                           "result": f"found {query}"},
+                "result": {"query": query, "mode": "alternate", "result": f"found {query}"},
                 "duration_ms": 42,
             }
 
         return {
             "status": "SUCCESS",
-            "result": {"query": query, "mode": "standard",
-                       "result": f"found {query}"},
+            "result": {"query": query, "mode": "standard", "result": f"found {query}"},
             "duration_ms": 42,
         }
 
@@ -203,14 +201,17 @@ class BenchmarkRunner:
 
             for family in self.task_families.values():
                 for _ in range(self.n_repetitions):
-                    self._run_single_task(family, metrics=m,
-                                          ebt_enabled=True, plugin=plugin)
+                    self._run_single_task(family, metrics=m, ebt_enabled=True, plugin=plugin)
 
         return self.metrics[mode]
 
-    def _run_single_task(self, family: Dict[str, Any],
-                         metrics: BenchmarkMetrics, ebt_enabled: bool,
-                         plugin: Optional[EBTTOPlugin] = None):
+    def _run_single_task(
+        self,
+        family: Dict[str, Any],
+        metrics: BenchmarkMetrics,
+        ebt_enabled: bool,
+        plugin: Optional[EBTTOPlugin] = None,
+    ):
         tool = family["tool"]
         task_id = ev.new_id()
 
@@ -233,13 +234,15 @@ class BenchmarkRunner:
             end = time.time()
             is_success = result.get("status") == "SUCCESS"
 
-            trajectory["tool_history"].append({
-                "attempt": 1,
-                "tool": "lookup",
-                "success": is_success,
-                "result": result.get("result", {}),
-                "duration_ms": int((end - start) * 1000),
-            })
+            trajectory["tool_history"].append(
+                {
+                    "attempt": 1,
+                    "tool": "lookup",
+                    "success": is_success,
+                    "result": result.get("result", {}),
+                    "duration_ms": int((end - start) * 1000),
+                }
+            )
 
             if is_success:
                 trajectory["first_tool_success"] = True
@@ -250,12 +253,14 @@ class BenchmarkRunner:
                 trajectory["wrong_tool"] += 1
                 metrics.wrong_tool_count += 1
         except Exception as e:
-            trajectory["tool_history"].append({
-                "attempt": 1,
-                "tool": "lookup",
-                "success": False,
-                "error": str(e),
-            })
+            trajectory["tool_history"].append(
+                {
+                    "attempt": 1,
+                    "tool": "lookup",
+                    "success": False,
+                    "error": str(e),
+                }
+            )
             metrics.wrong_tool_count += 1
 
         trajectory["total_tool_calls"] = tool.calls
@@ -268,8 +273,9 @@ class TestBenchmark:
     def test_baseline_metrics(self):
         benchmark = BenchmarkRunner(create_task_families(), n_repetitions=20)
         baseline = benchmark.run_baseline()
-        assert baseline.total_tasks >= 20, \
+        assert baseline.total_tasks >= 20, (
             f"Baseline ran {baseline.total_tasks} tasks, expected >= 20"
+        )
         assert 0.0 <= baseline.first_tool_success_rate <= 1.0
         assert 0.0 <= baseline.average_tool_calls <= 100.0
         assert 0.0 <= baseline.average_retries <= 100.0
@@ -277,10 +283,12 @@ class TestBenchmark:
     def test_ebtto_without_learning(self):
         benchmark = BenchmarkRunner(create_task_families(), n_repetitions=20)
         ebt_shadow = benchmark.run_ebtto(mode="shadow")
-        assert ebt_shadow.total_tasks >= 20, \
+        assert ebt_shadow.total_tasks >= 20, (
             f"EBTTO shadow mode ran {ebt_shadow.total_tasks} tasks, expected >= 20"
-        assert ebt_shadow.total_tool_calls >= 20, \
+        )
+        assert ebt_shadow.total_tool_calls >= 20, (
             f"EBTTO shadow mode ran {ebt_shadow.total_tool_calls} tool calls, expected >= 20"
+        )
 
     def test_smart_retry(self):
         tool = FakeLookupService()
@@ -289,6 +297,7 @@ class TestBenchmark:
         r3 = tool.lookup("test", mode="alternate")
         assert tool.calls >= 3, "Tool must have been called 3 times"
         from hermes_ebtto.learning import evaluate_pattern
+
         evaluate_pattern(success_count=2, evidence_count=3, independent_contexts=1)
         r3 = tool.lookup("test", mode="alternate")
         assert r3["status"] == "SUCCESS"
@@ -298,25 +307,30 @@ class TestBenchmark:
 
     def test_regression_detection(self):
         from hermes_ebtto.learning import rank_strategies, score_pattern
+
         historical = score_pattern(
-            success_count=19, evidence_count=20, independent_contexts=5,
-            recent_successes=19
+            success_count=19, evidence_count=20, independent_contexts=5, recent_successes=19
         )
         degraded = score_pattern(
-            success_count=10, evidence_count=20, independent_contexts=5,
-            recent_successes=10
+            success_count=10, evidence_count=20, independent_contexts=5, recent_successes=10
         )
         strategies = [
-            {"id": "hist", "confidence": 0.95, "status": "validated",
-             "context": {"model_compat": 1.0}},
-            {"id": "degraded", "confidence": degraded["confidence"],
-             "status": "degraded", "context": {"model_compat": 1.0}},
+            {
+                "id": "hist",
+                "confidence": 0.95,
+                "status": "validated",
+                "context": {"model_compat": 1.0},
+            },
+            {
+                "id": "degraded",
+                "confidence": degraded["confidence"],
+                "status": "degraded",
+                "context": {"model_compat": 1.0},
+            },
         ]
         ranked = rank_strategies(strategies, context={}, top_n=3)
-        assert ranked[0]["strategy"]["id"] == "hist", \
-            "Validated strategy should rank first"
-        assert ranked[-1]["strategy"]["id"] == "degraded", \
-            "Degraded strategy should rank last"
+        assert ranked[0]["strategy"]["id"] == "hist", "Validated strategy should rank first"
+        assert ranked[-1]["strategy"]["id"] == "degraded", "Degraded strategy should rank last"
         print("  REGRESSION VERIFIED:")
         print(f"    Historical confidence: {historical['confidence']:.2%}")
         print(f"    Degraded confidence: {degraded['confidence']:.2%}")
@@ -324,6 +338,7 @@ class TestBenchmark:
 
     def test_poisoning_resistance(self):
         from hermes_ebtto.learning import rank_strategies
+
         candidate = {
             "id": "bad-1",
             "strategy_name": "lookup_standard",
@@ -333,8 +348,7 @@ class TestBenchmark:
             "confidence": 0.0,
             "status": "candidate",
         }
-        assert candidate["confidence"] == 0.0, \
-            "One bad example should not produce a validated rule"
+        assert candidate["confidence"] == 0.0, "One bad example should not produce a validated rule"
         plan = candidate.copy()
         plan["evidence_count"] = 3
         plan["success_count"] = 3
@@ -343,8 +357,9 @@ class TestBenchmark:
         plan["id"] = "validated"  # Fix: plan copy retained candidate's id "bad-1"
         strategies = [plan, candidate]
         ranked = rank_strategies(strategies, context={}, top_n=2)
-        assert ranked[0]["strategy"]["id"] == "validated", \
+        assert ranked[0]["strategy"]["id"] == "validated", (
             "Validated rule should rank above candidate"
+        )
         print("  POISONING RESISTANCE VERIFIED:")
         print(f"    One bad trajectory: confidence = {candidate['confidence']}")
         print(f"    N=3 validated: confidence = {plan['confidence']}")

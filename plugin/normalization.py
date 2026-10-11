@@ -83,6 +83,7 @@ def normalize_path(value: str) -> str:
 # Fingerprints (versioned)
 # ---------------------------------------------------------------------------
 
+
 def task_fingerprint(task_family: str, **context: Any) -> str:
     """Versioned stable task fingerprint.
 
@@ -111,6 +112,7 @@ def strategy_fingerprint(sequence: List[str]) -> str:
 # ---------------------------------------------------------------------------
 # Storage-level sanitization (optional: duplicate trims, type coercion)
 # ---------------------------------------------------------------------------
+
 
 def sanitize_for_storage(value: Any, *, max_length: int = 5000) -> Any:
     """Trim, dedupe, coerce values for safe DB insertion."""

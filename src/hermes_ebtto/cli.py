@@ -20,10 +20,10 @@ from typing import List, Optional
 
 
 def _main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="hermes experience",
-                                     description="EBTTO experience management")
-    parser.add_argument("--json", action="store_true",
-                        help="machine-readable JSON output")
+    parser = argparse.ArgumentParser(
+        prog="hermes experience", description="EBTTO experience management"
+    )
+    parser.add_argument("--json", action="store_true", help="machine-readable JSON output")
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
 
     # status
@@ -69,7 +69,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     # mode
     p = sub.add_parser("mode", help="set mode")
-    p.add_argument("mode", nargs="?", help="OFF|RECORD_ONLY|SHADOW|ADVISORY|GUARDED|CONTROLLED_AUTO")
+    p.add_argument(
+        "mode", nargs="?", help="OFF|RECORD_ONLY|SHADOW|ADVISORY|GUARDED|CONTROLLED_AUTO"
+    )
     p.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
 
     # doctor
@@ -84,10 +86,24 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     args = parser.parse_args(argv)
     cmd = args.cmd or "help"
-    if args.json and cmd in ("status", "stats", "tools", "tasks", "patterns",
-                              "strategies", "failures", "regressions",
-                              "trajectory", "benchmark", "doctor", "mode",
-                              "enable", "disable", "on", "off"):
+    if args.json and cmd in (
+        "status",
+        "stats",
+        "tools",
+        "tasks",
+        "patterns",
+        "strategies",
+        "failures",
+        "regressions",
+        "trajectory",
+        "benchmark",
+        "doctor",
+        "mode",
+        "enable",
+        "disable",
+        "on",
+        "off",
+    ):
         # JSON mode: print object and exit nonzero on error
         pass
     # ---- dispatch to plugin methods ----
@@ -95,11 +111,17 @@ def _main(argv: Optional[List[str]] = None) -> int:
     #   store: hermes_ebtto.storage.Store
     #   mode: str
     # In the real Hermes plugin, these are bound in `register()`.
-    print(json.dumps({"error": "EBTTO CLI invoked without a running plugin instance.",
-                      "note": "This module is included for documentation purposes. "
-                              "The real command surface is registered in "
-                              "hermes_ebtto.plugins.EBTTOPlugin._register_commands."},
-                     indent=2))
+    print(
+        json.dumps(
+            {
+                "error": "EBTTO CLI invoked without a running plugin instance.",
+                "note": "This module is included for documentation purposes. "
+                "The real command surface is registered in "
+                "hermes_ebtto.plugins.EBTTOPlugin._register_commands.",
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

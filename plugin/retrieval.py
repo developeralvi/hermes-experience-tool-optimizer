@@ -61,8 +61,10 @@ def retrieve_experience(
     if strategy_store:
         for s in strategy_store.values():
             # Include strategies matching the task family (or the default health-check family)
-            family_match = getattr(s, "task_family", None) == task_family or \
-                           getattr(s, "task_family", None) == "runtime_health_check"
+            family_match = (
+                getattr(s, "task_family", None) == task_family
+                or getattr(s, "task_family", None) == "runtime_health_check"
+            )
             if family_match:
                 candidates.append(s)
             elif s.status in ("disabled", "quarantined"):
@@ -83,14 +85,22 @@ def retrieve_experience(
     if not filtered and top:
         filtered = top[:max_results]
     if not filtered and fallback_strategy:
-        filtered = [Strategy(strategy_id="fallback",
-                             strategy_name=fallback_strategy,
-                             strategy_type="best", sequence=[])]
+        filtered = [
+            Strategy(
+                strategy_id="fallback",
+                strategy_name=fallback_strategy,
+                strategy_type="best",
+                sequence=[],
+            )
+        ]
 
     return RetrievalResult(
         strategies=filtered,
-        context={"task_family": task_family, "max_results": max_results,
-                 "min_confidence": min_confidence},
+        context={
+            "task_family": task_family,
+            "max_results": max_results,
+            "min_confidence": min_confidence,
+        },
         retrieved_count=len(filtered),
         min_confidence=min_confidence,
         max_results=max_results,

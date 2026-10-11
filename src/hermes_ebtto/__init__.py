@@ -39,9 +39,14 @@ def register(ctx):
     enabled = os.environ.get("EBTTO_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
     from .plugins import EBTTOPlugin
-    plugin = EBTTOPlugin(manifest=None, ctx=ctx, config={
-        "mode": mode,
-        "enabled": enabled,
-    })
+
+    plugin = EBTTOPlugin(
+        manifest=None,
+        ctx=ctx,
+        config={
+            "mode": mode,
+            "enabled": enabled,
+        },
+    )
     plugin.register()
     return plugin

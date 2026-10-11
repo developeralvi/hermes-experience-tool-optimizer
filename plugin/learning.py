@@ -31,17 +31,30 @@ _W_RISKCAP = 0.10
 _W_RECENCY = 0.10
 
 _SUPERFLUOUS = {
-    "schema_version", "event_id", "created_at", "created_at_epoch_ms",
-    "class_", "confidence", "classifier_version", "sequence_number",
+    "schema_version",
+    "event_id",
+    "created_at",
+    "created_at_epoch_ms",
+    "class_",
+    "confidence",
+    "classifier_version",
+    "sequence_number",
 }
 
 
-def score_pattern(*, success_count: int, evidence_count: int,
-                  independent_contexts: int, recent_successes: int,
-                  model_compat: float = 1.0, provider_compat: float = 1.0,
-                  workspace_compat: float = 1.0, tool_avail: float = 1.0,
-                  regression_state: str = "validated",
-                  total_occurrences: int = 0) -> Dict[str, Any]:
+def score_pattern(
+    *,
+    success_count: int,
+    evidence_count: int,
+    independent_contexts: int,
+    recent_successes: int,
+    model_compat: float = 1.0,
+    provider_compat: float = 1.0,
+    workspace_compat: float = 1.0,
+    tool_avail: float = 1.0,
+    regression_state: str = "validated",
+    total_occurrences: int = 0,
+) -> Dict[str, Any]:
     """Compute a 0..1 confidence score with documented signals.
 
     Returns a dict with:
@@ -81,8 +94,11 @@ def score_pattern(*, success_count: int, evidence_count: int,
     # Reliability term: success rate * weight
     reliability_term = _W_RELIABILITY * reliability
     # Evidence term: sample-size-based evidence strength
-    evidence_term = _W_EVIDENCE * (1.0 if evidence_count >= MIN_EVIDENCE_FOR_VALIDATED
-                                    else evidence_count / max(1, MIN_EVIDENCE_FOR_VALIDATED))
+    evidence_term = _W_EVIDENCE * (
+        1.0
+        if evidence_count >= MIN_EVIDENCE_FOR_VALIDATED
+        else evidence_count / max(1, MIN_EVIDENCE_FOR_VALIDATED)
+    )
     # Risk term: compatibility * weight
     risk_term = _W_RISKCAP * compat
     # Recency term: recency * weight
@@ -108,14 +124,18 @@ def score_pattern(*, success_count: int, evidence_count: int,
             "min_success_rate": MIN_SUCCESS_RATE,
             "min_independent_contexts": MIN_INDEPENDENT_CONTEXTS,
             "regression_discount": {
-                "validated": 0.0, "degraded": 0.2, "quarantined": 0.8, "regressed": 0.5,
+                "validated": 0.0,
+                "degraded": 0.2,
+                "quarantined": 0.8,
+                "regressed": 0.5,
             },
         },
     }
 
 
-def rank_strategies(strategies: List[Dict[str, Any]], context: Dict[str, Any],
-                     top_n: int = 3) -> List[Dict[str, Any]]:
+def rank_strategies(
+    strategies: List[Dict[str, Any]], context: Dict[str, Any], top_n: int = 3
+) -> List[Dict[str, Any]]:
     """Rank candidate strategies by compatibility + score.
 
     Returns the top_n strategies, sorted by adjusted confidence.
@@ -158,7 +178,8 @@ class Strategy:
     last_used_at: Optional[str] = None
     version: int = 1
     scope: str = "global"  # global / profile / user / workspace / session
-    status: str = "candidate"  # candidate / validated / high_confidence / degraded / regressed / quarantined / disabled
+    # candidate / validated / high_confidence / degraded / regressed / quarantined
+    status: str = "candidate"
     created_at: Optional[str] = None
 
     def score(self, **kwargs) -> Dict[str, Any]:
@@ -176,17 +197,26 @@ class Strategy:
         )
 
 
-def evaluate_pattern(*, success_count: int, evidence_count: int,
-                     independent_contexts: int) -> Dict[str, Any]:
+def evaluate_pattern(
+    *, success_count: int, evidence_count: int, independent_contexts: int
+) -> Dict[str, Any]:
     """Return PATTERN VALIDATION state (Phase 16)."""
     if evidence_count < MIN_EVIDENCE_FOR_VALIDATED:
         return {"status": "candidate", "confidence": 0.0, "validated": False}
     success_rate = success_count / evidence_count
     if success_rate < MIN_SUCCESS_RATE:
-        return {"status": "candidate", "confidence": success_rate,
-                "validated": False, "reason": "success_rate_below_threshold"}
+        return {
+            "status": "candidate",
+            "confidence": success_rate,
+            "validated": False,
+            "reason": "success_rate_below_threshold",
+        }
     independent_ok = independent_contexts >= MIN_INDEPENDENT_CONTEXTS
     if independent_ok:
         return {"status": "validated", "confidence": success_rate, "validated": True}
-    return {"status": "candidate", "confidence": success_rate,
-            "validated": False, "reason": "insufficient_independent_contexts"}
+    return {
+        "status": "candidate",
+        "confidence": success_rate,
+        "validated": False,
+        "reason": "insufficient_independent_contexts",
+    }

@@ -31,7 +31,6 @@ def test_event_serialization_roundtrip():
     assert t2.task_family == "family"
 
 
-
 def test_privacy_redact_dict():
     payload = {"args": {"password": "secret123", "user": "alvi"}}
     out = priv.redact_dict(payload, mode="redacted")
@@ -87,9 +86,14 @@ def test_classification_result_status():
 
 def test_learning_score():
     s = ln.score_pattern(
-        success_count=10, evidence_count=12, independent_contexts=5,
-        recent_successes=4, model_compat=1.0, provider_compat=1.0,
-        workspace_compat=1.0, tool_avail=1.0,
+        success_count=10,
+        evidence_count=12,
+        independent_contexts=5,
+        recent_successes=4,
+        model_compat=1.0,
+        provider_compat=1.0,
+        workspace_compat=1.0,
+        tool_avail=1.0,
     )
     assert 0.0 <= s["confidence"] <= 1.0
     assert s["confidence"] > 0.0
@@ -97,28 +101,52 @@ def test_learning_score():
 
 def test_learning_validate_pattern():
     v = ln.evaluate_pattern(
-        success_count=10, evidence_count=12, independent_contexts=5,
+        success_count=10,
+        evidence_count=12,
+        independent_contexts=5,
     )
     assert v["validated"] is True
     v2 = ln.evaluate_pattern(
-        success_count=3, evidence_count=5, independent_contexts=1,
+        success_count=3,
+        evidence_count=5,
+        independent_contexts=1,
     )
     assert v2["validated"] is False
 
 
 def test_retrieval_bounds():
     from hermes_ebtto.learning import Strategy
+
     store = {
-        "s1": Strategy(strategy_id="s1", strategy_name="a", strategy_type="best",
-                       sequence=["t1"], success_count=10, evidence_count=12,
-                       context_count=5, confidence=0.9, status="validated"),
-        "s2": Strategy(strategy_id="s2", strategy_name="b", strategy_type="best",
-                       sequence=["t2"], success_count=2, evidence_count=3,
-                       context_count=1, confidence=0.5, status="candidate"),
+        "s1": Strategy(
+            strategy_id="s1",
+            strategy_name="a",
+            strategy_type="best",
+            sequence=["t1"],
+            success_count=10,
+            evidence_count=12,
+            context_count=5,
+            confidence=0.9,
+            status="validated",
+        ),
+        "s2": Strategy(
+            strategy_id="s2",
+            strategy_name="b",
+            strategy_type="best",
+            sequence=["t2"],
+            success_count=2,
+            evidence_count=3,
+            context_count=1,
+            confidence=0.5,
+            status="candidate",
+        ),
     }
     r = rt.retrieve_experience(
-        task_family="test", strategy_store=store, max_results=1,
-        min_confidence=0.6, fallback_strategy=None,
+        task_family="test",
+        strategy_store=store,
+        max_results=1,
+        min_confidence=0.6,
+        fallback_strategy=None,
     )
     assert r.retrieved_count <= 1
     assert len(r.strategies) <= 1

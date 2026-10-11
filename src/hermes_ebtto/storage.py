@@ -104,6 +104,34 @@ def get_storage_path() -> Path:
     return base / ".hermes-ebtto"
 
 
+def candidate_db_paths() -> List[Path]:
+    """Every ``.hermes-ebtto`` directory the plugin may have used.
+
+    The writer's storage path depends on its environment: the Hermes desktop
+    runtime sets HERMES_HOME to ``%LOCALAPPDATA%\\\\hermes``, while CLI shells
+    leave HERMES_HOME unset and resolve the storage directory under ``~``
+    (the real user home). Both are valid installs and only one holds the
+    live database, so the dashboard considers every location and binds to the
+    one that actually contains recorded rows.
+    """
+    dirs: List[Path] = []
+
+    def _add(base: Path) -> None:
+        d = base / ".hermes-ebtto"
+        if d not in dirs:
+            dirs.append(d)
+
+    env_home = os.environ.get("HERMES_HOME")
+    if env_home:
+        _add(Path(env_home).expanduser())
+    try:
+        _add(Path(os.path.expanduser("~")).resolve())
+    except Exception:
+        pass
+    _add(Path.cwd().resolve())
+    return dirs
+
+
 # ---------------------------------------------------------------------------
 # Migrations
 # ---------------------------------------------------------------------------
@@ -151,9 +179,7 @@ def ensure_schema(storage_path: Optional[Path] = None) -> int:
 
 
 def _read_version(conn: sqlite3.Connection) -> int:
-    row = conn.execute(
-        "SELECT version FROM schema_version ORDER BY id DESC LIMIT 1"
-    ).fetchone()
+    row = conn.execute("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1").fetchone()
     return int(row["version"]) if row else 0
 
 
@@ -462,9 +488,7 @@ class Store:
     def _conn(self) -> sqlite3.Connection:
         return _get_conn(self.db_path)
 
-    def _execute(
-        self, sql: str, params: Iterable[Any] = (), commit: bool = True
-    ) -> sqlite3.Cursor:
+    def _execute(self, sql: str, params: Iterable[Any] = (), commit: bool = True) -> sqlite3.Cursor:
         conn = self._conn()
         cur = conn.execute(sql, params)
         if commit:
@@ -518,15 +542,21 @@ class Store:
         )
         return turn.event_id
 
-    def record_turn_end(self, turn_id: str, *, task_id: str,
-                        end_timestamp: str, end_epoch_ms: int,
-                        tool_count: int, total_duration_ms: int,
-                        outcome: Optional[str]) -> None:
+    def record_turn_end(
+        self,
+        turn_id: str,
+        *,
+        task_id: str,
+        end_timestamp: str,
+        end_epoch_ms: int,
+        tool_count: int,
+        total_duration_ms: int,
+        outcome: Optional[str],
+    ) -> None:
         self._execute(
             """UPDATE turns SET end_timestamp = ?, end_epoch_ms = ?, tool_count = ?,
                total_duration_ms = ?, outcome = ? WHERE turn_id = ? AND task_id = ?""",
-            (end_timestamp, end_epoch_ms, tool_count, total_duration_ms,
-             outcome, turn_id, task_id),
+            (end_timestamp, end_epoch_ms, tool_count, total_duration_ms, outcome, turn_id, task_id),
         )
 
     # ---- tool calls --------------------------------------------------
@@ -570,8 +600,7 @@ class Store:
         # (the two hooks generate independent task ids). The column only
         # exists after migration 5; a pre-5 database must keep working, so
         # the write degrades to the base columns when it is missing.
-        cols = ("outcome_id, task_id, turn_id, result, confidence, evidence, "
-                "recorded_at")
+        cols = "outcome_id, task_id, turn_id, result, confidence, evidence, recorded_at"
         params = {
             **ev.event_to_dict(outcome),
             "evidence": self._json(outcome.evidence),
@@ -598,30 +627,30 @@ class Store:
     # ---- errors --------------------------------------------------
 
     def record_error(self, error: ev.Error) -> str:
-            """Persist one classified failure.
+        """Persist one classified failure.
 
-            Idempotent on the natural business key ``(task_id, turn_id,
-            tool_call_id)``: Hermes' single-fire contract normally delivers each
-            tool_call_id once, but a redelivery (retry, replayed turn, or a second
-            observer) must not create a duplicate error row.
+        Idempotent on the natural business key ``(task_id, turn_id,
+        tool_call_id)``: Hermes' single-fire contract normally delivers each
+        tool_call_id once, but a redelivery (retry, replayed turn, or a second
+        observer) must not create a duplicate error row.
 
-            Concurrency-safe: uses ``INSERT OR IGNORE`` against the
-            ``idx_errors_logical_key`` UNIQUE index (migration 3) rather than a
-            check-then-insert sequence, which would race between two simultaneous
-            callbacks.
-            """
-            params = dict(ev.event_to_dict(error))
-            params["evidence"] = self._json(error.evidence)
-            self._execute(
-                """INSERT OR IGNORE INTO errors
+        Concurrency-safe: uses ``INSERT OR IGNORE`` against the
+        ``idx_errors_logical_key`` UNIQUE index (migration 3) rather than a
+        check-then-insert sequence, which would race between two simultaneous
+        callbacks.
+        """
+        params = dict(ev.event_to_dict(error))
+        params["evidence"] = self._json(error.evidence)
+        self._execute(
+            """INSERT OR IGNORE INTO errors
                    (error_id, task_id, turn_id, tool_call_id, tool_name, error_class,
                     confidence, error_message, evidence, created_at)
                    VALUES (:error_id, :task_id, :turn_id, :tool_call_id, :tool_name,
                            :error_class, :confidence, :error_message, :evidence,
                            :created_at)""",
-                params,
-            )
-            return error.event_id
+            params,
+        )
+        return error.event_id
 
     # ---- trajectories ----------------------------------------------
 
@@ -663,10 +692,17 @@ class Store:
 
     # ---- tool profiles -------------------------------------------
 
-    def record_tool_profile(self, tool_name: str, *, average_success: float,
-                            first_pass_success: float, recovery_success: float,
-                            average_duration_ms: float, call_count: int,
-                            last_seen_at: Optional[str]) -> None:
+    def record_tool_profile(
+        self,
+        tool_name: str,
+        *,
+        average_success: float,
+        first_pass_success: float,
+        recovery_success: float,
+        average_duration_ms: float,
+        call_count: int,
+        last_seen_at: Optional[str],
+    ) -> None:
         self._execute(
             """INSERT INTO tool_profiles
                (tool_name, average_success, first_pass_success, recovery_success,
@@ -680,10 +716,19 @@ class Store:
                call_count = ?,
                last_seen_at = ?""",
             (
-                tool_name, average_success, first_pass_success, recovery_success,
-                average_duration_ms, call_count, last_seen_at,
-                average_success, first_pass_success, recovery_success,
-                average_duration_ms, call_count, last_seen_at,
+                tool_name,
+                average_success,
+                first_pass_success,
+                recovery_success,
+                average_duration_ms,
+                call_count,
+                last_seen_at,
+                average_success,
+                first_pass_success,
+                recovery_success,
+                average_duration_ms,
+                call_count,
+                last_seen_at,
             ),
         )
 
@@ -697,13 +742,28 @@ class Store:
         (``INSERT OR IGNORE`` would freeze first-seen counts). One strategy per
         (task_family, tool) logical key, so replays never accumulate duplicates.
         """
-        data = strategy if isinstance(strategy, dict) else {
-            k: getattr(strategy, k, None) for k in (
-                "strategy_id", "strategy_name", "strategy_type", "sequence",
-                "evidence_count", "success_count", "failure_count", "context_count",
-                "confidence", "last_validated_at", "scope", "status", "task_family",
-            )
-        }
+        data = (
+            strategy
+            if isinstance(strategy, dict)
+            else {
+                k: getattr(strategy, k, None)
+                for k in (
+                    "strategy_id",
+                    "strategy_name",
+                    "strategy_type",
+                    "sequence",
+                    "evidence_count",
+                    "success_count",
+                    "failure_count",
+                    "context_count",
+                    "confidence",
+                    "last_validated_at",
+                    "scope",
+                    "status",
+                    "task_family",
+                )
+            }
+        )
         strategy_id = data.get("strategy_id") or ev.new_id()
         self._execute(
             """INSERT INTO strategies
@@ -771,8 +831,20 @@ class Store:
 
         matched: List[Dict[str, Any]] = []
         for r in rows:
-            (strategy_id, name, stype, sequence_json, evidence, success, failure,
-             contexts, confidence, status, scope, task_family) = r
+            (
+                strategy_id,
+                name,
+                stype,
+                sequence_json,
+                evidence,
+                success,
+                failure,
+                contexts,
+                confidence,
+                status,
+                scope,
+                task_family,
+            ) = r
             # Family match first: the pre-LLM hook keys retrieval by a coarse task
             # family (file_edit, shell, ...). An empty family means the strategy was
             # stored before family scoping existed, so it stays globally applicable.
@@ -793,27 +865,34 @@ class Store:
             if tools_in_sequence and tool_name not in tools_in_sequence and not family_ok:
                 continue
             total = evidence or (success + failure) or 0
-            matched.append({
-                "strategy_id": strategy_id,
-                "strategy_name": name,
-                "strategy_type": stype,
-                "evidence_count": evidence or 0,
-                "success_count": success or 0,
-                "failure_count": failure or 0,
-                "context_count": contexts or 0,
-                "confidence": float(confidence or 0.0),
-                "success_rate": (success / total) if total else 0.0,
-                "status": status,
-                "scope": scope,
-                "task_family": task_family or "",
-            })
+            matched.append(
+                {
+                    "strategy_id": strategy_id,
+                    "strategy_name": name,
+                    "strategy_type": stype,
+                    "evidence_count": evidence or 0,
+                    "success_count": success or 0,
+                    "failure_count": failure or 0,
+                    "context_count": contexts or 0,
+                    "confidence": float(confidence or 0.0),
+                    "success_rate": (success / total) if total else 0.0,
+                    "status": status,
+                    "scope": scope,
+                    "task_family": task_family or "",
+                }
+            )
             if len(matched) >= limit:
                 break
         return matched
 
-    def update_strategy_evidence(self, strategy_id: str, *, success: bool,
-                                 confidence: Optional[float] = None,
-                                 status: Optional[str] = None) -> None:
+    def update_strategy_evidence(
+        self,
+        strategy_id: str,
+        *,
+        success: bool,
+        confidence: Optional[float] = None,
+        status: Optional[str] = None,
+    ) -> None:
         """Fold one new observed outcome into a strategy's evidence counters."""
         self._execute(
             """UPDATE strategies
@@ -824,8 +903,14 @@ class Store:
                       status         = COALESCE(?, status),
                       last_validated_at = ?
                 WHERE strategy_id = ?""",
-            (1 if success else 0, 0 if success else 1, confidence,
-             status, _utcnow_iso(), strategy_id),
+            (
+                1 if success else 0,
+                0 if success else 1,
+                confidence,
+                status,
+                _utcnow_iso(),
+                strategy_id,
+            ),
         )
 
     # ---- patterns ---------------------------------------------
@@ -839,12 +924,23 @@ class Store:
         freeze the first-seen counts forever). Keyed on ``pattern_id`` so the
         row count stays stable no matter how often learning re-runs.
         """
-        data = pattern if isinstance(pattern, dict) else {
-            k: getattr(pattern, k, None) for k in (
-                "pattern_id", "pattern_name", "pattern_type", "evidence_count",
-                "success_count", "failure_count", "confidence", "status",
-            )
-        }
+        data = (
+            pattern
+            if isinstance(pattern, dict)
+            else {
+                k: getattr(pattern, k, None)
+                for k in (
+                    "pattern_id",
+                    "pattern_name",
+                    "pattern_type",
+                    "evidence_count",
+                    "success_count",
+                    "failure_count",
+                    "confidence",
+                    "status",
+                )
+            }
+        )
         pattern_id = data.get("pattern_id") or ev.new_id()
         self._execute(
             """INSERT INTO patterns
@@ -859,18 +955,25 @@ class Store:
                  failure_count  = excluded.failure_count,
                  confidence     = excluded.confidence,
                  status         = excluded.status""",
-            (pattern_id, data.get("pattern_name") or data.get("pattern_type") or "unnamed",
-             data.get("pattern_type") or "unknown",
-             int(data.get("evidence_count") or 0), int(data.get("success_count") or 0),
-             int(data.get("failure_count") or 0), float(data.get("confidence") or 0.0),
-             data.get("status") or "candidate", _utcnow_iso()),
+            (
+                pattern_id,
+                data.get("pattern_name") or data.get("pattern_type") or "unnamed",
+                data.get("pattern_type") or "unknown",
+                int(data.get("evidence_count") or 0),
+                int(data.get("success_count") or 0),
+                int(data.get("failure_count") or 0),
+                float(data.get("confidence") or 0.0),
+                data.get("status") or "candidate",
+                _utcnow_iso(),
+            ),
         )
         return pattern_id
 
     # ---- retrieval ---------------------------------------------
 
-    def record_retrieval(self, retrieval_id: str, *, task_fingerprint: str,
-                         retrieved_count: int) -> str:
+    def record_retrieval(
+        self, retrieval_id: str, *, task_fingerprint: str, retrieved_count: int
+    ) -> str:
         self._execute(
             """INSERT INTO retrieval_events
                (retrieval_id, task_fingerprint, retrieved_count, retrieved_at)
@@ -881,8 +984,9 @@ class Store:
 
     # ---- learning ---------------------------------------------
 
-    def record_learning_event(self, event_type: str, payload: Dict[str, Any],
-                              *, task_id: str) -> str:
+    def record_learning_event(
+        self, event_type: str, payload: Dict[str, Any], *, task_id: str
+    ) -> str:
         self._execute(
             """INSERT INTO learning_events
                (learning_id, task_id, event_type, payload, recorded_at)
@@ -893,15 +997,19 @@ class Store:
 
     # ---- evaluations -------------------------------------------
 
-    def record_evaluation(self, benchmark: str, category: str,
-                          *,
-                          baseline_first_success: Optional[float],
-                          baseline_avg_calls: Optional[float],
-                          baseline_avg_retries: Optional[float],
-                          ebt_to_first_success: Optional[float],
-                          ebt_avg_calls: Optional[float],
-                          ebt_avg_retries: Optional[float],
-                          improvement_points: Optional[float]) -> str:
+    def record_evaluation(
+        self,
+        benchmark: str,
+        category: str,
+        *,
+        baseline_first_success: Optional[float],
+        baseline_avg_calls: Optional[float],
+        baseline_avg_retries: Optional[float],
+        ebt_to_first_success: Optional[float],
+        ebt_avg_calls: Optional[float],
+        ebt_avg_retries: Optional[float],
+        improvement_points: Optional[float],
+    ) -> str:
         self._execute(
             """INSERT INTO evaluations
                (evaluation_id, benchmark, category, baseline_first_success,
@@ -910,18 +1018,24 @@ class Store:
                 recorded_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                ev.new_id(), benchmark, category,
-                baseline_first_success, baseline_avg_calls, baseline_avg_retries,
-                ebt_to_first_success, ebt_avg_calls, ebt_avg_retries,
-                improvement_points, _utcnow_iso(),
+                ev.new_id(),
+                benchmark,
+                category,
+                baseline_first_success,
+                baseline_avg_calls,
+                baseline_avg_retries,
+                ebt_to_first_success,
+                ebt_avg_calls,
+                ebt_avg_retries,
+                improvement_points,
+                _utcnow_iso(),
             ),
         )
         return ev.new_id()
 
     # ---- metrics ---------------------------------------------
 
-    def record_metric(self, metric_name: str, value: float,
-                      period: str) -> str:
+    def record_metric(self, metric_name: str, value: float, period: str) -> str:
         self._execute(
             """INSERT INTO metrics
                (metric_name, value, period, recorded_at)
@@ -932,17 +1046,29 @@ class Store:
 
     # ---- regressions ------------------------------------------
 
-    def record_regression(self, strategy_id: str, strategy_name: str,
-                          *, degradation_start: str,
-                          evidence: Optional[Dict[str, Any]] = None,
-                          status: str = "degraded") -> str:
+    def record_regression(
+        self,
+        strategy_id: str,
+        strategy_name: str,
+        *,
+        degradation_start: str,
+        evidence: Optional[Dict[str, Any]] = None,
+        status: str = "degraded",
+    ) -> str:
         self._execute(
             """INSERT INTO regressions
                (regression_id, strategy_id, strategy_name, degradation_start,
                 evidence, status, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (ev.new_id(), strategy_id, strategy_name, degradation_start,
-             self._json(evidence) if evidence else None, status, _utcnow_iso()),
+            (
+                ev.new_id(),
+                strategy_id,
+                strategy_name,
+                degradation_start,
+                self._json(evidence) if evidence else None,
+                status,
+                _utcnow_iso(),
+            ),
         )
         return ev.new_id()
 
@@ -952,5 +1078,4 @@ class Store:
         rows = self._execute(
             "SELECT version, applied_at FROM schema_version ORDER BY id"
         ).fetchall()
-        return [{"version": r["version"], "applied_at": r["applied_at"]}
-                for r in rows]
+        return [{"version": r["version"], "applied_at": r["applied_at"]} for r in rows]

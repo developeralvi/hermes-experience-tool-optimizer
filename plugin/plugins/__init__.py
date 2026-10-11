@@ -1,4 +1,3 @@
-
 """EBTTO — Experience-Based Tool Trajectory Optimizer for Hermes.
 
 Adapts to the installed Hermes 0.21.5 hook contract.
@@ -7,6 +6,7 @@ Uses ONLY public plugin APIs:
   hermes_ebtto.plugins.invoke_hook() — module-level hook invocation helper.
 Does NOT modify Hermes core.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,6 +29,7 @@ from .. import config as ebtto_config
 # instead of hitting an unrelated (or absent) installation.
 def _alias_canonical_package() -> None:
     import sys as _sys
+
     if "hermes_ebtto" in _sys.modules:
         return
     pkg = __name__.rpartition(".")[0]
@@ -93,14 +94,13 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Default EBTTO storage path for the plugin
-DEFAULT_STORAGE_PATH = Path(
-    os.environ.get("EBTTO_DATA_DIR", str(Path.home() / ".hermes-ebtto"))
-)
+DEFAULT_STORAGE_PATH = Path(os.environ.get("EBTTO_DATA_DIR", str(Path.home() / ".hermes-ebtto")))
 
 
 def _get_hermes_types():
     """Lazy import of Hermes plugin types — hermes_cli.plugins may not be installed."""
     from hermes_cli.plugins import PluginContext, PluginManifest, PluginRegistration
+
     return PluginContext, PluginManifest, PluginRegistration
 
 
@@ -111,6 +111,7 @@ class EBTTOStore:
         if storage_path is None:
             storage_path = Path(DEFAULT_STORAGE_PATH)
         from hermes_ebtto.storage import Store
+
         self.store = Store(storage_path)
         self.db_path = storage_path / "ebtto.db"
 
@@ -135,6 +136,11 @@ class EBTTOStore:
     def get_patterns_by_tool(self, tool_name, limit=3):
         return self.store.get_patterns_by_tool(tool_name, limit=limit)
 
+    def record_retrieval(self, retrieval_id, *, task_fingerprint, retrieved_count):
+        return self.store.record_retrieval(
+            retrieval_id, task_fingerprint=task_fingerprint, retrieved_count=retrieved_count
+        )
+
     def get_trajectories(self, **filters):
         return self.store.get_trajectories(**filters)
 
@@ -143,6 +149,7 @@ class EBTTOStore:
 
     def release(self):
         self.store.close()
+
 
 def register(ctx):
     """Module-level register(ctx) - the Hermes plugin entry point.
@@ -168,6 +175,7 @@ def register(ctx):
     #      Resolved from the canonical constant so the declared default and the
     #      effective fallback cannot drift apart.
     import os as _os
+
     _default_mode = getattr(ebtto_config, "DEFAULT_MODE", "record_only")
     mode = _os.environ.get("EBTTO_MODE", "").strip()
     if not mode:
@@ -175,10 +183,14 @@ def register(ctx):
             mode = ctx.get_config("mode", _default_mode)
         except Exception:
             mode = _default_mode
-    plugin = EBTTOPlugin(manifest=None, ctx=ctx, config={
-        "mode": mode,
-        "enabled": True,
-    })
+    plugin = EBTTOPlugin(
+        manifest=None,
+        ctx=ctx,
+        config={
+            "mode": mode,
+            "enabled": True,
+        },
+    )
     plugin.register()
     return plugin
 
@@ -242,7 +254,8 @@ class EBTTOPlugin:
 
         log.info(
             "EBTTO plugin registering for mode=%s (enabled=%s)",
-            self.mode, self.enabled,
+            self.mode,
+            self.enabled,
         )
 
         # Register the lifecycle hooks via the public ctx.register_hook() API
@@ -259,8 +272,7 @@ class EBTTOPlugin:
         self._register_admin_commands()
 
         self._started = True
-        log.info("EBTTO plugin registered (mode=%s, hooks=%d)",
-                 self.mode, len(self._hook_handles))
+        log.info("EBTTO plugin registered (mode=%s, hooks=%d)", self.mode, len(self._hook_handles))
 
     # -- Hook registration -------------------------------------------------
 
@@ -273,17 +285,25 @@ class EBTTOPlugin:
         # fires only AFTER the model has already chosen the tool and is therefore
         # too late to influence that choice.
         if self.mode != self.MODE_OFF:
-            self._hook_handles.append(self.ctx.register_hook("pre_llm_call", self._hook_pre_llm_call))
+            self._hook_handles.append(
+                self.ctx.register_hook("pre_llm_call", self._hook_pre_llm_call)
+            )
 
         # Register pre_tool_call: intercept before the tool executes
         if self.mode != self.MODE_OFF:
-            self._hook_handles.append(self.ctx.register_hook("pre_tool_call", self._hook_pre_tool_call))
+            self._hook_handles.append(
+                self.ctx.register_hook("pre_tool_call", self._hook_pre_tool_call)
+            )
 
         # Register post_tool_call: record actual result
-        self._hook_handles.append(self.ctx.register_hook("post_tool_call", self._hook_post_tool_call))
+        self._hook_handles.append(
+            self.ctx.register_hook("post_tool_call", self._hook_post_tool_call)
+        )
 
         # Register on_session_end: flush per-task state
-        self._hook_handles.append(self.ctx.register_hook("on_session_end", self._hook_on_session_end))
+        self._hook_handles.append(
+            self.ctx.register_hook("on_session_end", self._hook_on_session_end)
+        )
 
     def _hook_pre_llm_call(self, **kwargs):
         """Wrapper for the pre_llm_call hook."""
@@ -316,12 +336,18 @@ class EBTTOPlugin:
                 user_message = str(user_message)
             task_family = self._derive_task_family(user_message)
 
-            guidance = self._retrieve_guidance_for_task(task_family, {"user_message": user_message}, task_id)
+            guidance = self._retrieve_guidance_for_task(
+                task_family, {"user_message": user_message}, task_id
+            )
             if not guidance:
                 self._record_retrieval_event(
-                    task_id=task_id, task_fingerprint=task_family,
-                    hook="pre_llm_call", candidate_count=0, qualified_count=0,
-                    selected_strategy_id=None, guidance_returned=False,
+                    task_id=task_id,
+                    task_fingerprint=task_family,
+                    hook="pre_llm_call",
+                    candidate_count=0,
+                    qualified_count=0,
+                    selected_strategy_id=None,
+                    guidance_returned=False,
                     reason_code="no_candidate",
                 )
                 return None
@@ -329,22 +355,33 @@ class EBTTOPlugin:
             hint = (guidance.get("directive") or {}).get("hint")
             if not hint:
                 self._record_retrieval_event(
-                    task_id=task_id, task_fingerprint=task_family,
-                    hook="pre_llm_call", candidate_count=1, qualified_count=1,
+                    task_id=task_id,
+                    task_fingerprint=task_family,
+                    hook="pre_llm_call",
+                    candidate_count=1,
+                    qualified_count=1,
                     selected_strategy_id=guidance.get("strategy_id"),
-                    guidance_returned=False, reason_code="candidate_below_threshold",
+                    guidance_returned=False,
+                    reason_code="candidate_below_threshold",
                 )
                 return None
 
             self._record_retrieval_event(
-                task_id=task_id, task_fingerprint=task_family,
-                hook="pre_llm_call", candidate_count=1, qualified_count=1,
+                task_id=task_id,
+                task_fingerprint=task_family,
+                hook="pre_llm_call",
+                candidate_count=1,
+                qualified_count=1,
                 selected_strategy_id=guidance.get("strategy_id"),
-                guidance_returned=True, reason_code="guidance_returned",
+                guidance_returned=True,
+                reason_code="guidance_returned",
             )
             self.metrics["guidance_injected"] += 1
-            log.info("[EBTTO pre_llm_call] injecting guidance for task=%s: %s",
-                     task_id, guidance.get("strategy_name", "unknown"))
+            log.info(
+                "[EBTTO pre_llm_call] injecting guidance for task=%s: %s",
+                task_id,
+                guidance.get("strategy_name", "unknown"),
+            )
 
             # Bounded, evidence-backed, task-scoped text. Treated as DATA by the
             # model, never as an instruction to re-run a historical trajectory.
@@ -380,12 +417,15 @@ class EBTTOPlugin:
         try:
             from hermes_ebtto import events as ev
 
-            tool_name = kwargs.get("tool_name") or kwargs.get("tool_input", {}).get("name", "unknown")
+            tool_name = kwargs.get("tool_name") or kwargs.get("tool_input", {}).get(
+                "name", "unknown"
+            )
             args = kwargs.get("args") or kwargs.get("tool_input", {})
 
             # Track metrics
             self.metrics["tool_calls"] += 1
 
+            task_id_db: Optional[str] = None
             if self.store is not None:
                 # Record the tool call
                 t = ev.Task(
@@ -413,32 +453,56 @@ class EBTTOPlugin:
                 self.store.record_tool_call(tool_call)
 
             # In shadow/advisory/guarded modes, we may inject guidance
-            if self.mode in (self.MODE_SHADOW, self.MODE_ADVISORY, self.MODE_GUARDED, self.MODE_CONTROLLED_AUTO):
+            if self.mode in (
+                self.MODE_SHADOW,
+                self.MODE_ADVISORY,
+                self.MODE_GUARDED,
+                self.MODE_CONTROLLED_AUTO,
+            ):
                 guidance = self._retrieve_guidance_for_task(
                     kwargs.get("tool_name"),
                     kwargs.get("args", {}),
                     kwargs.get("task_id", ""),
                 )
                 if guidance:
+                    # Link the retrieval event to the task row actually stored
+                    # above (task_id_db). Using the Hermes session id here made
+                    # guidance events join nothing: tasks are keyed by the
+                    # generated uuid, so the dashboard could never show which
+                    # task produced the guidance.
                     self._record_retrieval_event(
-                        task_id=kwargs.get("task_id", ""),
+                        task_id=task_id_db,
                         task_fingerprint=kwargs.get("tool_name") or "unknown",
-                        hook="pre_tool_call", candidate_count=1, qualified_count=1,
+                        hook="pre_tool_call",
+                        candidate_count=1,
+                        qualified_count=1,
                         selected_strategy_id=guidance.get("strategy_id"),
-                        guidance_returned=True, reason_code="guidance_returned",
+                        guidance_returned=True,
+                        reason_code="guidance_returned",
                     )
                     self.metrics["guidance_injected"] += 1
                     if self.mode == self.MODE_SHADOW:
-                        log.info("[EBTTO SHADOW] Guidance: %s", guidance.get("strategy_name", "unknown"))
+                        log.info(
+                            "[EBTTO SHADOW] Guidance: %s", guidance.get("strategy_name", "unknown")
+                        )
                     elif self.mode == self.MODE_ADVISORY:
-                        return guidance.get("directive", {"action": "continue", "guidance": guidance})
+                        return guidance.get(
+                            "directive", {"action": "continue", "guidance": guidance}
+                        )
                     elif self.mode == self.MODE_GUARDED:
-                        log.warning("[EBTTO GUARDED] Requires user approval before executing: %s",
-                                    guidance.get("strategy_name", "unknown"))
-                        return {"action": "continue", "requires_approval": True,
-                                "guidance": guidance}
+                        log.warning(
+                            "[EBTTO GUARDED] Requires user approval before executing: %s",
+                            guidance.get("strategy_name", "unknown"),
+                        )
+                        return {
+                            "action": "continue",
+                            "requires_approval": True,
+                            "guidance": guidance,
+                        }
                     elif self.mode == self.MODE_CONTROLLED_AUTO:
-                        return self._apply_strategy_to_args(tool_name, kwargs.get("args", {}), guidance)
+                        return self._apply_strategy_to_args(
+                            tool_name, kwargs.get("args", {}), guidance
+                        )
 
             return None
 
@@ -488,18 +552,25 @@ class EBTTOPlugin:
                     turn_id=turn_id,
                     result="SUCCESS" if success else "FAILURE",
                     confidence=0.90,
-                    evidence={"tool": tool_name, "status": status,
-                              "result": self._safe_text(result_str)[:500]},
+                    evidence={
+                        "tool": tool_name,
+                        "status": status,
+                        "result": self._safe_text(result_str)[:500],
+                    },
                     tool_call_id=tool_call_id,
                 )
                 self.store.record_outcome(outcome)
 
                 if not success:
                     self._record_failure(
-                        task_id=task_id, turn_id=turn_id,
-                        tool_call_id=tool_call_id, tool_name=tool_name,
-                        status=status, error_type=error_type,
-                        error_message=error_message, result=result,
+                        task_id=task_id,
+                        turn_id=turn_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        status=status,
+                        error_type=error_type,
+                        error_message=error_message,
+                        result=result,
                     )
 
             self.metrics["tool_calls"] += 1
@@ -515,11 +586,9 @@ class EBTTOPlugin:
             store = self.store
             if store is not None and self._started and task_id and tool_call_id:
                 try:
-                    self._learn_pattern(task_id=task_id, tool_name=tool_name,
-                                        success=success)
+                    self._learn_pattern(task_id=task_id, tool_name=tool_name, success=success)
                 except Exception as exc:
-                    log.warning("EBTTO pattern learning failed for %s: %s",
-                                tool_name, exc)
+                    log.warning("EBTTO pattern learning failed for %s: %s", tool_name, exc)
 
             return None
 
@@ -561,6 +630,7 @@ class EBTTOPlugin:
         raw = str(text)[:limit]
         try:
             from hermes_ebtto import privacy as pr
+
             out = pr.redact_str(raw)
             if out == raw:
                 out = pr.redact(raw, mode="masked")
@@ -576,13 +646,23 @@ class EBTTOPlugin:
         """Recursively redact a structured payload for storage."""
         try:
             from hermes_ebtto import privacy as pr
+
             return pr.sanitize_payload(obj)
         except Exception:
             return {"note": "payload dropped: sanitization unavailable"}
 
-    def _record_failure(self, *, task_id: str, turn_id: str, tool_call_id: str,
-                        tool_name: str, status: str, error_type: Optional[str],
-                        error_message: Optional[str], result: Any) -> None:
+    def _record_failure(
+        self,
+        *,
+        task_id: str,
+        turn_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        status: str,
+        error_type: Optional[str],
+        error_message: Optional[str],
+        result: Any,
+    ) -> None:
         """Classify a genuine failure and persist it as a canonical Error event.
 
         The classifier receives only observable hook fields — never guessed
@@ -620,8 +700,12 @@ class EBTTOPlugin:
             error_class = "unknown"
             confidence = 0.0
 
-        log.info("[EBTTO] Failure on %s classified as %s (confidence=%.2f)",
-                 tool_name, error_class, confidence)
+        log.info(
+            "[EBTTO] Failure on %s classified as %s (confidence=%.2f)",
+            tool_name,
+            error_class,
+            confidence,
+        )
 
         try:
             from hermes_ebtto import events as ev
@@ -645,10 +729,15 @@ class EBTTOPlugin:
             if self.store is not None and self._started:
                 log.info("[EBTTO] Session metrics: %s", self.metrics)
                 self.metrics = {
-                    "tool_calls": 0, "successes": 0, "failures": 0,
-                    "first_tool_successes": 0, "retries": 0,
-                    "regressions": 0, "guidance_injected": 0,
-                    "guidance_accepted": 0, "guidance_blocked": 0,
+                    "tool_calls": 0,
+                    "successes": 0,
+                    "failures": 0,
+                    "first_tool_successes": 0,
+                    "retries": 0,
+                    "regressions": 0,
+                    "guidance_injected": 0,
+                    "guidance_accepted": 0,
+                    "guidance_blocked": 0,
                 }
             return None
         except Exception as e:
@@ -760,16 +849,26 @@ class EBTTOPlugin:
 
             log.info(
                 "[EBTTO] Pattern persisted for %s: %s (evidence=%d, success_rate=%.2f)",
-                tool_name, pattern_id, evidence_count,
+                tool_name,
+                pattern_id,
+                evidence_count,
                 success_count / evidence_count,
             )
         except Exception as exc:
             log.warning("EBTTO pattern learning failed for %s: %s", tool_name, exc)
 
-    def _record_retrieval_event(self, *, task_id: str, task_fingerprint: str,
-                                hook: str, candidate_count: int, qualified_count: int,
-                                selected_strategy_id: Optional[str],
-                                guidance_returned: bool, reason_code: str) -> None:
+    def _record_retrieval_event(
+        self,
+        *,
+        task_id: str,
+        task_fingerprint: str,
+        hook: str,
+        candidate_count: int,
+        qualified_count: int,
+        selected_strategy_id: Optional[str],
+        guidance_returned: bool,
+        reason_code: str,
+    ) -> None:
         """Persist one retrieval/guidance lifecycle event (fail-open).
 
         Telemetry only: never changes learning behavior. Any failure (missing
@@ -781,6 +880,7 @@ class EBTTOPlugin:
                 return
             from hermes_ebtto.events import new_id
             from hermes_ebtto.storage import _utcnow_iso
+
             inner = getattr(self.store, "store", self.store)
             inner._execute(
                 """INSERT OR IGNORE INTO retrieval_guidance_events
@@ -788,15 +888,25 @@ class EBTTOPlugin:
                     qualified_count, selected_strategy_id, guidance_returned,
                     reason_code, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (new_id(), task_id, task_fingerprint, hook, candidate_count,
-                 qualified_count, selected_strategy_id, 1 if guidance_returned else 0,
-                 reason_code, _utcnow_iso()),
+                (
+                    new_id(),
+                    task_id,
+                    task_fingerprint,
+                    hook,
+                    candidate_count,
+                    qualified_count,
+                    selected_strategy_id,
+                    1 if guidance_returned else 0,
+                    reason_code,
+                    _utcnow_iso(),
+                ),
             )
         except Exception as exc:
             log.debug("EBTTO retrieval telemetry skipped: %s", exc)
 
-    def _retrieve_guidance_for_task(self, tool_name: str, args: Dict[str, Any],
-                                    task_id: str) -> Optional[Dict[str, Any]]:
+    def _retrieve_guidance_for_task(
+        self, tool_name: str, args: Dict[str, Any], task_id: str
+    ) -> Optional[Dict[str, Any]]:
         if self.store is None or not self.enabled:
             return None
 
@@ -809,6 +919,22 @@ class EBTTOPlugin:
             task_fingerprint(family, args=args, session_id=task_id)
 
             patterns = self.store.get_patterns_by_tool(family, limit=3)
+            from hermes_ebtto.events import new_id as _new_id
+
+            retrieval_id = _new_id()
+            # Record the retrieval ATTEMPT itself (distinct from guidance
+            # being returned). retrieval_events stayed at 0 rows in every real
+            # installation because no runtime path called record_retrieval;
+            # without it the dashboard cannot tell "retrieval ran and matched
+            # nothing" from "retrieval never ran".
+            try:
+                self.store.record_retrieval(
+                    retrieval_id,
+                    task_fingerprint=family,
+                    retrieved_count=len(patterns),
+                )
+            except Exception:
+                pass  # fail-open: telemetry never breaks a tool call
             if not patterns:
                 return None
 
@@ -823,10 +949,10 @@ class EBTTOPlugin:
                 "directive": {
                     "action": "continue",
                     "hint": f"Previous similar calls to {family} succeeded with "
-                            f"'{best.get('strategy_name', 'the first strategy')}' "
-                            f"(success rate {best.get('success_rate', 0.0):.0%} over "
-                            f"{best.get('evidence_count', 0)} examples). "
-                            f"Review evidence: {best.get('evidence_count', 0)} examples.",
+                    f"'{best.get('strategy_name', 'the first strategy')}' "
+                    f"(success rate {best.get('success_rate', 0.0):.0%} over "
+                    f"{best.get('evidence_count', 0)} examples). "
+                    f"Review evidence: {best.get('evidence_count', 0)} examples.",
                 },
             }
 
@@ -855,14 +981,23 @@ class EBTTOPlugin:
         # names `terminal` and only incidentally mentions `python`; without this
         # tier the `execute_code` keyword list (which contains "python") captures it
         # and retrieval pulls experience for the wrong tool entirely.
-        tool_names = ("browser_exec", "execute_code", "write_file", "read_file",
-                      "search_files", "terminal", "patch")
+        tool_names = (
+            "browser_exec",
+            "execute_code",
+            "write_file",
+            "read_file",
+            "search_files",
+            "terminal",
+            "patch",
+        )
         for name in tool_names:
             if name in text:
                 return name
-        for name, phrases in (("terminal", ("terminal tool",)),
-                              ("patch", ("patch tool",)),
-                              ("read_file", ("read file tool",))):
+        for name, phrases in (
+            ("terminal", ("terminal tool",)),
+            ("patch", ("patch tool",)),
+            ("read_file", ("read file tool",)),
+        ):
             if any(p in text for p in phrases):
                 return name
 
@@ -870,13 +1005,32 @@ class EBTTOPlugin:
         # distinctive families are tested first so "write file" lands on
         # write_file rather than the broader patch bucket.
         keywords = {
-            "terminal": ("run", "execute", "command", "terminal", "shell", "install",
-                         "npm", "pip", "git ", "bash", "cmd"),
+            "terminal": (
+                "run",
+                "execute",
+                "command",
+                "terminal",
+                "shell",
+                "install",
+                "npm",
+                "pip",
+                "git ",
+                "bash",
+                "cmd",
+            ),
             "execute_code": ("python", "script", "code", "execute_code", "snippet"),
-            "read_file": ("read", "open", "show me", "inspect", "cat ", "view",
-                          "look at"),
-            "patch": ("patch", "edit", "overwrite", "write file", "update file",
-                      "modify", "create file", "save", "fix"),
+            "read_file": ("read", "open", "show me", "inspect", "cat ", "view", "look at"),
+            "patch": (
+                "patch",
+                "edit",
+                "overwrite",
+                "write file",
+                "update file",
+                "modify",
+                "create file",
+                "save",
+                "fix",
+            ),
             "write_file": ("write file", "create file", "new file", "save to"),
             "search_files": ("search", "find", "grep", "look for", "locate"),
             "browser_exec": ("browse", "website", "web page", "browser", "open url"),
@@ -886,10 +1040,14 @@ class EBTTOPlugin:
                 return family
         return "general"
 
-    def _apply_strategy_to_args(self, tool_name: str, args: Dict[str, Any],
-                                guidance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        log.info("[EBTTO CONTROLLED_AUTO] Proposed strategy for %s: %s",
-                 tool_name, guidance.get("strategy_name"))
+    def _apply_strategy_to_args(
+        self, tool_name: str, args: Dict[str, Any], guidance: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        log.info(
+            "[EBTTO CONTROLLED_AUTO] Proposed strategy for %s: %s",
+            tool_name,
+            guidance.get("strategy_name"),
+        )
         return {"EBTTO_GUIDED": True, **args}
 
     def _register_cli_commands(self):

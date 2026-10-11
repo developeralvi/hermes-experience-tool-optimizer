@@ -141,7 +141,9 @@ def classify_error(
         return Classification(class_="network_failure", confidence=0.80, evidence=evidence)
     if _match(msg, ["permission", "denied", "forbidden", "unauthorized", "ephemeral"]):
         return Classification(class_="permission_failure", confidence=0.80, evidence=evidence)
-    if _match(msg, ["tool error", "tool failed", "executable not found", "command failed", "exit code"]):
+    if _match(
+        msg, ["tool error", "tool failed", "executable not found", "command failed", "exit code"]
+    ):
         return Classification(class_="tool_failure", confidence=0.75, evidence=evidence)
     if _match(msg, ["stale", "not found", "no such file", "expired", "used", "already"]):
         return Classification(class_="stale_state", confidence=0.70, evidence=evidence)
@@ -177,9 +179,7 @@ def _canonicalize(value: str) -> Optional[str]:
 
 def _classify_by_status(status_code: int, evidence: Dict[str, Any]) -> Classification:
     if 500 <= status_code < 600:
-        return Classification(
-            class_="external_service_failure", confidence=0.80, evidence=evidence
-        )
+        return Classification(class_="external_service_failure", confidence=0.80, evidence=evidence)
     if status_code == 429:
         return Classification(class_="network_failure", confidence=0.75, evidence=evidence)
     if status_code == 401:
@@ -230,8 +230,15 @@ def infer_result_status(
         # Observable success signals in output text
         if any(
             kw in msg
-            for kw in ("succeeded", "success", "exit 0", "exit_code=0",
-                       "output present", "all tests passed", "ok")
+            for kw in (
+                "succeeded",
+                "success",
+                "exit 0",
+                "exit_code=0",
+                "output present",
+                "all tests passed",
+                "ok",
+            )
         ):
             return "SUCCESS"
     return "FAILURE"
