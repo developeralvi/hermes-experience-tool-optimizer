@@ -139,6 +139,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/task":
                 _json_response(self, 200, queries.task_timeline(
                     conn, q.get("id", "")) or {"error": "not found"})
+            elif path == "/api/live_trace":
+                _json_response(self, 200, queries.live_trace(
+                    conn, q.get("id", "")) or {"error": "not found"})
             elif path == "/api/strategies":
                 _json_response(self, 200, queries.strategies(
                     conn, status=q.get("status"), family=q.get("family"),

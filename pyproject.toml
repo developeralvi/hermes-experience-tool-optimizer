@@ -23,7 +23,44 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-cov", "ruff"]
+dev = ["pytest>=8.0", "pytest-cov", "ruff", "mypy"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Real-defect rules only. The codebase deliberately uses typing.Dict/Optional
+# style (UP006/UP045 modernization) and fail-open broad excepts (BLE001) by
+# design in the plugin hot paths; those stylistic rules are NOT enabled.
+select = ["E", "F", "B", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests use fixtures/dynamic imports that trip strict import rules
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+# The dashboard query layer builds SQL dynamically from validated fragments
+# and returns Dict[str, Any] shapes; strict typing there adds no safety.
+disable_error_code = ["no-untyped-def"]
+# Known pre-existing patterns (verified safe by tests, not weakening strictness
+# globally): the plugin's fail-open None-guards around the EBTTOStore wrapper
+# (mypy cannot narrow the wrapper), Trajectory's property-style fields, and
+# the _Connection adapter's Iterable params. Each site is guarded at runtime
+# and covered by the test suite.
+[[tool.mypy.overrides]]
+module = "hermes_ebtto.plugins"
+disable_error_code = ["attr-defined", "union-attr", "assignment", "arg-type"]
+
+[[tool.mypy.overrides]]
+module = "hermes_ebtto.storage"
+disable_error_code = ["arg-type", "exit-return", "return-value"]
+
+[[tool.mypy.overrides]]
+module = "hermes_ebtto.events"
+disable_error_code = ["misc"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

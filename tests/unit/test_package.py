@@ -3,13 +3,11 @@ and exposes the public API with no import-time side effects.
 """
 
 from hermes_ebtto import __version__
-from hermes_ebtto import events as ev
-from hermes_ebtto import storage as st
-from hermes_ebtto import privacy as priv
 from hermes_ebtto import classification as cls
+from hermes_ebtto import events as ev
 from hermes_ebtto import learning as ln
+from hermes_ebtto import privacy as priv
 from hermes_ebtto import retrieval as rt
-from hermes_ebtto.plugins import EBTTOPlugin
 
 
 def test_version():

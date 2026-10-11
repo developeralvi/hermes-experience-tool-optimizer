@@ -60,6 +60,16 @@ pre { background:var(--chip); padding:8px; border-radius:6px; overflow:auto;
 .pager button { background:var(--chip); color:var(--text); border:1px solid var(--border);
                 border-radius:6px; padding:4px 10px; cursor:pointer; }
 .pager button:disabled { opacity:.4; cursor:default; }
+.legacy-banner {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: rgba(220, 160, 30, 0.18);
+  border: 1px solid rgba(220, 160, 30, 0.45);
+  color: var(--foreground);
+}
 .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); display:inline-block; }
 .dot.stale { background:var(--warn); } .dot.down { background:var(--fail); }
 .hidden { display:none !important; }

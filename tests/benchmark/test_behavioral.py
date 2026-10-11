@@ -20,12 +20,10 @@ Possible outcomes:
 
 import os
 import sys
-import time
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-import pytest
 
 PROJECT_ROOT = Path(os.environ.get("EBTTO_PROJECT_ROOT", Path(__file__).parent.parent))
 SRC = PROJECT_ROOT / "src"
@@ -286,8 +284,8 @@ class TestBenchmark:
 
     def test_smart_retry(self):
         tool = FakeLookupService()
-        r1 = tool.lookup("test", mode="standard")
-        r2 = tool.lookup("test", mode="standard")
+        tool.lookup("test", mode="standard")
+        tool.lookup("test", mode="standard")
         r3 = tool.lookup("test", mode="alternate")
         assert tool.calls >= 3, "Tool must have been called 3 times"
         from hermes_ebtto.learning import evaluate_pattern
@@ -299,7 +297,7 @@ class TestBenchmark:
         print(f"    Strategy change succeeded: {r3['status'] == 'SUCCESS'}")
 
     def test_regression_detection(self):
-        from hermes_ebtto.learning import score_pattern, rank_strategies
+        from hermes_ebtto.learning import rank_strategies, score_pattern
         historical = score_pattern(
             success_count=19, evidence_count=20, independent_contexts=5,
             recent_successes=19

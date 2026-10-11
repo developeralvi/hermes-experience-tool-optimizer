@@ -135,11 +135,11 @@ class EbttoConfig:
         *,
         enabled: bool = True,
         mode: str = "shadow",
-        storage: Dict[str, Any] = None,
-        retrieval: Dict[str, Any] = None,
-        intervention: Dict[str, Any] = None,
-        learning: Dict[str, Any] = None,
-        privacy: Dict[str, Any] = None,
+        storage: Optional[Dict[str, Any]] = None,
+        retrieval: Optional[Dict[str, Any]] = None,
+        intervention: Optional[Dict[str, Any]] = None,
+        learning: Optional[Dict[str, Any]] = None,
+        privacy: Optional[Dict[str, Any]] = None,
     ):
         self.enabled = enabled
         self.mode = mode

@@ -193,6 +193,7 @@ def redact_str(text: str, mode: str = "redacted") -> str:
         text = SENDGRID_RE.sub("[MASKED]", text)
         text = CONN_STRING_RE.sub(lambda m: m.group(1) + "=[MASKED]", text)
         return text
+    return text
 
 
 def redact_value(value: str, mode: str) -> str:

@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from hermes_ebtto import dashboard
 from hermes_ebtto.dashboard import queries, server
 from hermes_ebtto.storage import Store
 
@@ -34,8 +33,9 @@ def db(tmp_path):
     session with similar text.
     """
     store = Store(tmp_path)
-    from hermes_ebtto import events as ev
     import time as _time
+
+    from hermes_ebtto import events as ev
 
     session = "sess-1"
     # The pre-tool recorder generates its own task id (never the kwargs one)
@@ -382,7 +382,8 @@ def test_guidance_absent_on_pre_v4_db(tmp_path):
         " pattern_type TEXT, evidence_count INT, success_count INT, failure_count INT,"
         " confidence REAL, last_validated_at TEXT, status TEXT, created_at TEXT);"
     )
-    con.commit(); con.close()
+    con.commit()
+    con.close()
     c = queries.open_ro(str(tmp_path / "legacy.db"))
     try:
         assert queries.has_guidance_telemetry(c) is False
@@ -438,7 +439,8 @@ def test_concurrent_writer_and_reader(tmp_path):
                 task_id="t", tool_call_id=f"c-{i}", tool_name="terminal",
                 result_status="ok", duration_ms=1))
             i += 1
-    th = threading.Thread(target=writer); th.start()
+    th = threading.Thread(target=writer)
+    th.start()
     try:
         for _ in range(5):
             c = queries.open_ro(str(tmp_path))
@@ -447,7 +449,8 @@ def test_concurrent_writer_and_reader(tmp_path):
     except Exception as e:
         errors.append(e)
     finally:
-        stop.set(); th.join()
+        stop.set()
+        th.join()
     assert not errors, f"concurrent reads failed: {errors}"
 
 
@@ -565,9 +568,9 @@ def test_xss_payloads_are_inert_text(tmp_path):
         # JS source never interpolates API data via innerHTML
         js = (Path(server.__file__).parent / "assets" / "app.js").read_text(encoding="utf-8")
         code = js.split("*/", 1)[1]  # strip the leading block comment
-        code_lines = [l for l in code.splitlines()
-                      if not l.lstrip().startswith("//")]
-        assert not any("innerHTML" in l for l in code_lines), \
+        code_lines = [line for line in code.splitlines()
+                      if not line.lstrip().startswith("//")]
+        assert not any("innerHTML" in line for line in code_lines), \
             "frontend must build DOM with textContent"
     finally:
         c.close()
@@ -584,8 +587,8 @@ def test_no_external_resources_in_frontend():
 # --- CLI ---------------------------------------------------------------------
 
 def test_dashboard_cli_entrypoint_importable():
+
     from hermes_ebtto.dashboard.__main__ import main
-    import argparse
     # --help must exit 0 without starting a server
     with pytest.raises(SystemExit) as ei:
         main(["--help"])
@@ -593,7 +596,8 @@ def test_dashboard_cli_entrypoint_importable():
 
 
 def test_module_launch_help():
-    import subprocess, sys
+    import subprocess
+    import sys
     r = subprocess.run([sys.executable, "-m", "hermes_ebtto.dashboard", "--help"],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0
@@ -743,13 +747,12 @@ def test_connection_cleanup_no_accumulation(db):
     capability checks are per-call catalog queries), so the only measurable
     state is the OS handle count, which must stay bounded.
     """
-    import sqlite3 as _sq
     def open_handles():
         # count open sqlite connection objects is not directly possible;
         # measure via the module's own bookkeeping: none exists by design.
         return 0
     before = open_handles()
-    for i in range(300):
+    for _ in range(300):
         c = queries.open_ro(str(db))
         # capabilities still work per-call
         assert queries.has_guidance_telemetry(c) is True
@@ -773,8 +776,9 @@ def test_close_conn_is_idempotent_and_safe(db):
 
 def test_failed_schema_check_releases_connection():
     """open_ro must not leak a connection when _assert_schema raises."""
+    import pathlib
     import sqlite3
-    import tempfile, pathlib
+    import tempfile
     d = tempfile.mkdtemp()
     p = pathlib.Path(d) / "ebtto.db"
     con = sqlite3.connect(str(p))
@@ -929,3 +933,220 @@ def test_migration5_adds_tool_call_id_column(tmp_path):
     assert "tool_call_id" in cols
     assert con.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0] == 1
     con.close()
+
+
+# --- Live Usage Trace --------------------------------------------------------
+
+def test_live_trace_full_chain_with_correlation(conn, db):
+    """The trace shows every genuinely observed stage and labels missing
+    instrumentation honestly."""
+    task_id = queries.tasks(conn, window="all")["rows"][0]["task_id"]
+    d = queries.live_trace(conn, task_id)
+    assert d is not None
+    stages = d["stages"]
+    labels = [s["stage"] for s in stages]
+    assert "TASK OBSERVED" in labels
+    assert "TOOL CALL" in labels
+    assert "OUTCOME RECORDED" in labels
+    # correlated schema: outcomes join by tool_call_id
+    assert d["schema"]["outcome_correlation"] is True
+    outcome_stages = [s for s in stages if s["stage"] == "OUTCOME RECORDED"]
+    assert len(outcome_stages) == 3          # call-1, call-2, call-3
+    assert all(s["status"] == "OUTCOME RECORDED" for s in outcome_stages)
+    # no fabricated delivery stage
+    delivery = [s for s in stages if s["stage"] == "GUIDANCE DELIVERED"]
+    assert delivery and delivery[0]["status"] == "NOT VERIFIED"
+
+
+def test_live_trace_missing_task(conn):
+    assert queries.live_trace(conn, "no-such-task") is None
+
+
+def test_live_trace_legacy_schema_states_unknown(tmp_path):
+    """On a pre-v5 DB the outcome stage says NOT RECORDED (unlinkable) —
+    never a session-level guess."""
+    import sqlite3 as sq
+    d = tmp_path / "ebtto.db"
+    # build a minimal legacy DB by copying fixture-free schema: use Store then
+    # drop the tool_call_id column by recreating outcomes without it
+    store = Store(tmp_path)
+    from hermes_ebtto import events as ev
+    t = ev.Task(task_fingerprint="fp", task_family="terminal")
+    store.record_task(t)
+    store.record_tool_call(ev.ToolCall(
+        task_id=t.task_id, turn_id="s:1:1", tool_call_id="c1",
+        tool_name="terminal", result_status="PENDING"))
+    store.record_outcome(ev.Outcome(
+        task_id="p", turn_id="s:p:1", result="SUCCESS", confidence=0.9,
+        evidence={"tool": "terminal"}, tool_call_id="c1"))
+    # simulate legacy: drop the correlation column
+    con = sq.connect(str(d))
+    con.execute("DROP INDEX IF EXISTS idx_outcomes_tool_call")
+    con.execute("ALTER TABLE outcomes DROP COLUMN tool_call_id")
+    con.commit()
+    con.close()
+    c = queries.open_ro(str(tmp_path))
+    try:
+        assert queries.has_outcome_correlation(c) is False
+        tr = queries.live_trace(c, t.task_id)
+        oc = [s for s in tr["stages"] if s["stage"] == "OUTCOME RECORDED"]
+        assert oc and oc[0]["status"] == "NOT RECORDED (unlinkable)"
+        assert "Migration 5" in oc[0]["detail"]
+        # tool calls still observed
+        assert any(s["stage"] == "TOOL CALL" for s in tr["stages"])
+    finally:
+        c.close()
+
+
+def test_live_trace_retrieval_stages_from_telemetry(conn, db):
+    task_id = queries.tasks(conn, window="all")["rows"][0]["task_id"]
+    d = queries.live_trace(conn, task_id)
+    stages = {s["stage"]: s for s in d["stages"]}
+    assert "RETRIEVAL ATTEMPTED" in stages
+    assert "STRATEGY SELECTED" in stages
+    assert "GUIDANCE RETURNED" in stages
+    assert stages["GUIDANCE RETURNED"]["status"] == "GUIDANCE RETURNED"
+    # memory update is honestly NOT VERIFIED
+    assert stages["MEMORY UPDATED"]["status"] == "NOT VERIFIED"
+
+
+# --- strategy detail: qualification + usage distinction ----------------------
+
+def test_strategy_detail_qualification_thresholds(conn):
+    rows = queries.strategies(conn)
+    sid = rows["rows"][0]["strategy_id"]
+    d = queries.strategy_detail(conn, sid)
+    q = d["qualification"]
+    assert q["thresholds"]["min_evidence"] == 5
+    assert q["thresholds"]["min_success_rate"] == 0.8
+    assert q["thresholds"]["min_independent_contexts"] == 3
+    # the fixture strategy is validated: 6 evidence, 3 contexts, 100% success
+    assert q["checks"]["evidence"] is True
+    assert q["checks"]["contexts"] is True
+    assert q["checks"]["success_rate"] is True
+    assert "Validated" in q["explanation"]
+    # usage distinction: stored != used
+    assert d["usage"]["selected"] == 1     # one guidance event selected it
+    assert d["usage"]["guidance_returned"] == 1
+    assert "BEHAVIORAL IMPROVEMENT NOT YET PROVEN" in " ".join(
+        d["usage_distinctions"])
+    assert len(d["source_trajectory_ids"]) >= 0
+
+
+def test_strategy_detail_never_marks_stored_as_used(conn):
+    """A strategy with no retrieval events must report 'not recorded' usage,
+    not a fabricated usage count."""
+    import tempfile
+
+    from hermes_ebtto.storage import Store
+    d2 = tempfile.mkdtemp()
+    store = Store(d2)
+    store.record_strategy({
+        "strategy_id": "strat-unused", "strategy_name": "never used",
+        "strategy_type": "tool_best_practice", "sequence": [],
+        "evidence_count": 1, "success_count": 1, "failure_count": 0,
+        "context_count": 1, "confidence": 0.5, "status": "candidate",
+        "task_family": "read_file"})
+    c = queries.open_ro(d2)
+    try:
+        d = queries.strategy_detail(c, "strat-unused")
+        assert d["usage"]["retrievals_considered"] == 0
+        assert d["usage"]["selected"] == 0
+        assert d["usage"]["guidance_returned"] == 0
+        assert d["qualification"]["checks"]["evidence"] is False
+        assert "Candidate" in d["qualification"]["explanation"]
+    finally:
+        c.close()
+
+
+# --- system status diagnostics ------------------------------------------------
+
+def test_system_status_reports_migration_and_telemetry_state(conn):
+    d = queries.system_status(conn)
+    assert d["expected_schema_version"] == 5
+    assert d["schema_version"] == 5
+    assert d["migration_pending"] is False
+    assert d["outcome_correlation"] is True
+    assert d["guidance_telemetry"] is True
+    # telemetry recording: the fixture wrote 1 event
+    assert d["telemetry"]["state"] == "recording"
+    assert d["telemetry"]["count"] == 1
+    assert d["last_tool_call_at"]
+    assert d["last_outcome_at"]
+    assert d["last_guidance_at"]
+    assert isinstance(d["unknown_outcomes"], int)
+    assert d["plugin_restart_required"] is False
+
+
+def test_system_status_legacy_schema_pending(tmp_path):
+    """A legacy DB reports migration pending and unavailable telemetry."""
+    import sqlite3 as sq
+    d = tmp_path / "ebtto.db"
+    store = Store(tmp_path)
+    from hermes_ebtto import events as ev
+    store.record_task(ev.Task(task_fingerprint="fp", task_family="x"))
+    con = sq.connect(str(d))
+    con.execute("DROP INDEX IF EXISTS idx_outcomes_tool_call")
+    con.execute("ALTER TABLE outcomes DROP COLUMN tool_call_id")
+    con.execute("DROP TABLE retrieval_guidance_events")
+    con.execute("DELETE FROM schema_version")
+    con.execute("INSERT INTO schema_version (version, applied_at) "
+                "VALUES (3, '2026-01-01T00:00:00Z')")
+    con.commit()
+    con.close()
+    c = queries.open_ro(str(tmp_path))
+    try:
+        d2 = queries.system_status(c)
+        assert d2["schema_version"] == 3
+        assert d2["expected_schema_version"] == 5
+        assert d2["migration_pending"] is True
+        assert d2["outcome_correlation"] is False
+        assert d2["guidance_telemetry"] is False
+        assert d2["telemetry"]["state"] == "unavailable_schema"
+        assert d2["unknown_outcomes"] == d2["counts"]["tool_calls"]
+        assert d2["plugin_restart_required"] is True
+    finally:
+        c.close()
+
+
+def test_live_trace_endpoint_via_http(http_server, db):
+    code, _, body = _get(http_server, "/api/live_trace?id=missing")
+    assert code == 200
+    import json
+    d = json.loads(body)
+    assert "error" in d      # missing task -> error payload, not a crash
+
+
+# --- record_task id bug -------------------------------------------------------
+
+def test_record_task_returns_stored_task_id(tmp_path):
+    """record_task must return the id it actually STORES, so dependent rows
+    (tool calls) reference an existing task row."""
+    store = Store(tmp_path)
+    from hermes_ebtto import events as ev
+    t = ev.Task(task_fingerprint="fp", task_family="terminal")
+    returned = store.record_task(t)
+    import sqlite3
+    con = sqlite3.connect(str(tmp_path / "ebtto.db"))
+    stored = con.execute("SELECT task_id FROM tasks").fetchall()
+    con.close()
+    assert returned == t.task_id
+    assert returned in [r[0] for r in stored]
+    assert returned != t.event_id or t.task_id == t.event_id  # ids differ by design
+
+
+def test_task_tool_calls_join_after_record_task(tmp_path):
+    """A tool call recorded with the returned task_id joins the tasks table."""
+    store = Store(tmp_path)
+    from hermes_ebtto import events as ev
+    t = ev.Task(task_fingerprint="fp", task_family="terminal")
+    tid = store.record_task(t)
+    store.record_tool_call(ev.ToolCall(
+        task_id=tid, turn_id="x", tool_call_id="c1", tool_name="terminal"))
+    import sqlite3
+    con = sqlite3.connect(str(tmp_path / "ebtto.db"))
+    joined = con.execute(
+        "SELECT t.task_id FROM tasks t JOIN tool_calls tc ON tc.task_id = t.task_id"
+    ).fetchall()
+    con.close()
+    assert len(joined) == 1

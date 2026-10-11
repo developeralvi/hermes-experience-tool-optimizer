@@ -56,7 +56,8 @@ The dashboard opens exactly the database the plugin writes to:
 | **Trajectories** | Task list → per-task timeline: every persisted stage (tool_call / outcome / error) in order, with missing stages stated explicitly. |
 | **Memory** | Patterns + strategies with confidence, evidence/success/failure/context counts, qualification status, family, timestamps. Detail view shows the sequence, a real evidence sample (outcome rows for the strategy's family), and retrieval events that selected it. Displays the lifecycle explicitly: RAW OBSERVATION → … → BEHAVIORAL EFFECT MEASURED. |
 | **Guidance** | Retrieval/guidance audit: one row per hook retrieval with reason code (`guidance_returned` / `no_candidate` / `candidate_below_threshold`), candidate/qualified counts, selected strategy. States plainly that these events do **not** prove model delivery or behavioral effect. On a pre-v4 database the page says the telemetry is unavailable instead of showing nothing. |
-| **System** | Schema version, DB path, integrity check, last event timestamp, row counts, what telemetry is missing. Read-only, no secrets. |
+| **Live Trace** | Per-task chain: task → tool calls → outcomes (correlated by tool_call_id) → retrieval → qualification → selection → guidance → delivery → memory. Observed stages are labeled EVENT OBSERVED / OUTCOME RECORDED / RECOVERY OBSERVED; missing instrumentation is labeled NOT RECORDED / NOT VERIFIED — never fabricated. Click any task, or a source trajectory ID from a strategy, to open its trace. |
+| **System** | Schema version vs expected, migration-pending flag, per-table latest timestamps, UNKNOWN count, telemetry state (unavailable_schema / pending_restart_or_zero / recording), plugin-restart requirement, DB path, integrity, row counts. Read-only, no secrets. |
 
 Refresh: 5s default (adjustable 0/5/15/60s), pauses when the tab is
 hidden, refreshes on focus, shows last-refresh time + connection dot,
@@ -71,6 +72,18 @@ manual Refresh button, honest empty/error states.
   page until a controlled benchmark exists.
 - "Not recorded" / "Not verified" is shown wherever the underlying
   telemetry does not exist.
+
+## Live state after the v5 migration
+
+The production database was upgraded v3→v5 (additive, backup verified).
+Until Hermes is **restarted** with the updated plugin:
+
+- new outcomes still lack `tool_call_id` → every call reads UNKNOWN (honest)
+- retrieval telemetry stays at zero → state `pending_restart_or_zero`
+
+After restart, per-call correlation and retrieval telemetry go live
+automatically. The status bar shows a legacy-schema banner explaining
+exactly which capabilities are unavailable and why.
 
 ## Telemetry note (schema v4)
 

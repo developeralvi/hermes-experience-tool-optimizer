@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 
 def json_dumps(obj: Any, **kwargs) -> str:

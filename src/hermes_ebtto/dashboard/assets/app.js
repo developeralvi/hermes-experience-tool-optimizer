@@ -64,6 +64,83 @@ function emptyState(msg) {
   return el("div", "empty", msg);
 }
 
+/* ---------------- status bar: freshness + legacy banner ---------------- */
+
+function updateFreshness(sys) {
+  const f = $("#freshness");
+  const b = $("#legacy-banner");
+  if (!sys) { f.textContent = ""; b.hidden = true; return; }
+  const parts = [];
+  if (sys.last_event_at) {
+    const age = (Date.now() - new Date(sys.last_event_at).getTime()) / 1000;
+    parts.push("last event " + fmtAge(age));
+  } else {
+    parts.push("no events recorded");
+  }
+  f.textContent = "· " + parts.join(" · ");
+  // legacy-schema limitation banner
+  const limits = [];
+  if (!sys.outcome_correlation) {
+    limits.push("legacy schema: per-tool outcome correlation unavailable "
+      + "(all outcomes UNKNOWN until migration 5 + plugin restart)");
+  }
+  if (!sys.guidance_telemetry) {
+    limits.push("retrieval telemetry unavailable (migration 4 + plugin restart)");
+  } else if (sys.telemetry && sys.telemetry.state === "pending_restart_or_zero") {
+    limits.push("retrieval telemetry active but zero events — plugin restart "
+      + "or no retrieval since activation");
+  }
+  if (sys.migration_pending) {
+    limits.push(`schema v${sys.schema_version} < expected v${sys.expected_schema_version} — migration pending`);
+  }
+  if (limits.length) {
+    b.textContent = "⚠ " + limits.join(" · ");
+    b.hidden = false;
+  } else {
+    b.hidden = true;
+  }
+}
+
+function fmtAge(seconds) {
+  if (seconds < 60) return Math.round(seconds) + "s ago";
+  if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
+  if (seconds < 86400) return Math.round(seconds / 3600) + "h ago";
+  return Math.round(seconds / 86400) + "d ago";
+}
+
+/* ---------------- Live Usage Trace page ---------------- */
+
+async function renderLiveTrace() {
+  const d = await api("tasks", { window: state.window, page: state.pages.trace || 1 });
+  view.textContent = "";
+  const f = el("div", "filters");
+  f.append(el("span", null, "window:"), windowSelect());
+  f.append(el("span", null,
+    " — select a task to trace the full chain: tool calls → outcomes → "
+    + "retrieval → guidance. Missing instrumentation is stated explicitly."));
+  view.append(f);
+  view.append(el("h2", null, "Live Usage Trace"));
+  const t = el("table");
+  const thead = el("thead"); const trh = el("tr");
+  ["time", "family", "intent (sanitized)", "trace"].forEach((x) => trh.append(el("th", null, x)));
+  thead.append(trh); t.append(thead);
+  const tb = el("tbody");
+  for (const r of d.rows) {
+    const tr = el("tr");
+    const link = el("a", null, "trace →"); link.href = "#";
+    link.onclick = (e) => { e.preventDefault();
+      state.detail = { type: "trace", id: r.task_id }; renderDetail(); };
+    tr.append(el("td", null, fmtTime(r.created_at)),
+      el("td", null, r.task_family || "—"),
+      el("td", null, (r.sanitized_intent || "").slice(0, 80) || "—"),
+      el("td").appendChild(link).parentNode);
+    tb.append(tr);
+  }
+  t.append(tb);
+  view.append(t);
+  pager(view, d, () => renderLiveTrace());
+}
+
 /* ---------------- page renderers ---------------- */
 
 async function renderOverview() {
@@ -318,8 +395,53 @@ async function renderDetail() {
         cards.append(c);
       }
       view.append(cards);
+
+      // qualification thresholds + reason
+      if (d.qualification) {
+        view.append(el("h3", null, "Qualification"));
+        const th = d.qualification.thresholds;
+        view.append(el("p", null,
+          `Thresholds: ≥${th.min_evidence} evidence · ≥${(th.min_success_rate * 100).toFixed(0)}% success · ≥${th.min_independent_contexts} independent contexts. `
+          + "Observed: " + esc(d.qualification.explanation)));
+      }
+
+      // observed usage vs stored
+      if (d.usage) {
+        view.append(el("h3", null, "Observed usage"));
+        const u = d.usage;
+        const uv = el("div", "cards");
+        const add = (label, value) => {
+          const c = el("div", "card");
+          c.append(el("div", "label", label), el("div", "value", String(value)));
+          uv.append(c);
+        };
+        add("stored", "yes (this row)");
+        add("considered", u.retrievals_considered == null ? "not recorded" : u.retrievals_considered);
+        add("selected", u.selected == null ? "not recorded" : u.selected);
+        add("guidance returned", u.guidance_returned == null ? "not recorded" : u.guidance_returned);
+        add("delivered", "not verifiable");
+        add("behavioral effect", "NOT YET PROVEN");
+        view.append(uv);
+      }
+      if (d.usage_distinctions) {
+        view.append(el("p", null, esc(d.usage_distinctions.join("  ·  "))));
+      }
+
       view.append(el("h3", null, "Sequence"));
       view.append(el("pre", null, JSON.stringify(d.sequence, null, 2)));
+      view.append(el("h3", null, "Source trajectory IDs (evidence tasks)"));
+      if (d.source_trajectory_ids && d.source_trajectory_ids.length) {
+        const wrap = el("div");
+        for (const tid of d.source_trajectory_ids.slice(0, 20)) {
+          const link = el("a", null, tid); link.href = "#";
+          link.onclick = (e) => { e.preventDefault();
+            state.detail = { type: "trace", id: tid }; renderDetail(); };
+          wrap.append(link, el("span", null, " "));
+        }
+        view.append(wrap);
+      } else {
+        view.append(emptyState("No source trajectory IDs recorded."));
+      }
       view.append(el("h3", null, "Evidence sample (outcomes for this family)"));
       if (!d.evidence_sample.length) view.append(emptyState("No outcome rows match this strategy's task family."));
       const t = el("table");
@@ -330,13 +452,39 @@ async function renderDetail() {
         t.append(tr);
       }
       view.append(t);
+      if (d.related_failures && d.related_failures.length) {
+        view.append(el("h3", null, "Related failures (this family)"));
+        const t3 = el("table");
+        for (const e of d.related_failures) {
+          const tr = el("tr");
+          tr.append(el("td", null, fmtTime(e.created_at)), el("td", null, e.error_class),
+            el("td", null, (e.error_message || "").slice(0, 100)));
+          t3.append(tr);
+        }
+        view.append(t3);
+      }
+      if (d.related_recoveries && d.related_recoveries.length) {
+        view.append(el("h3", null, "Related recoveries (same tool_call_id later succeeded)"));
+        const t4 = el("table");
+        for (const r of d.related_recoveries) {
+          const tr = el("tr");
+          tr.append(el("td", null, r.tool_call_id), el("td", null, fmtTime(r.failed_at)),
+            el("td", null, fmtTime(r.recovered_at)));
+          t4.append(tr);
+        }
+        view.append(t4);
+      } else if (d.related_note) {
+        view.append(el("p", null, esc(d.related_note)));
+      }
       if (d.guidance_events && d.guidance_events.length) {
         view.append(el("h3", null, "Retrieval events selecting this strategy"));
         const t2 = el("table");
         for (const g of d.guidance_events) {
           const tr = el("tr");
           tr.append(el("td", null, g.task_id || "—"), el("td", null, g.hook),
-            el("td", null, g.reason_code), el("td", null, fmtTime(g.created_at)));
+            el("td", null, g.reason_code),
+            el("td", null, g.guidance_returned ? "returned" : "not returned"),
+            el("td", null, fmtTime(g.created_at)));
           t2.append(tr);
         }
         view.append(t2);
@@ -346,6 +494,48 @@ async function renderDetail() {
             ? "Retrieval telemetry not available (schema v4 table missing)."
             : "This strategy has never been retrieved (no guidance events reference it)."));
       }
+    } else if (type === "trace") {
+      const d = await api("live_trace", { id });
+      view.append(el("h2", null, "Live Usage Trace — " + (d.task.task_id || id)));
+      const cards = el("div", "cards");
+      for (const [k, v] of [["family", d.task.task_family],
+        ["provider", d.task.provider], ["model", d.task.model],
+        ["created", fmtTime(d.task.created_at)],
+        ["outcome correlation", d.schema.outcome_correlation ? "available" : "unavailable (legacy schema)"],
+        ["guidance telemetry", d.schema.guidance_telemetry ? "available" : "unavailable (legacy schema)"]]) {
+        const c = el("div", "card");
+        c.append(el("div", "label", k), el("div", "value", esc(String(v ?? "—"))));
+        cards.append(c);
+      }
+      view.append(cards);
+      view.append(el("h3", null, "Observed chain"));
+      const t = el("table");
+      const thead = el("thead"); const trh = el("tr");
+      ["stage", "status", "at", "detail"].forEach((x) => trh.append(el("th", null, x)));
+      thead.append(trh); t.append(thead);
+      const tb = el("tbody");
+      for (const s of d.stages) {
+        const tr = el("tr");
+        const observed = s.status === "EVENT OBSERVED"
+          || s.status === "OUTCOME RECORDED"
+          || s.status === "RECOVERY OBSERVED"
+          || s.status === "RETRIEVAL ATTEMPTED"
+          || s.status === "STRATEGY SELECTED"
+          || s.status === "GUIDANCE RETURNED";
+        tr.append(el("td", null, s.stage),
+          el("td").appendChild(badge(observed, s.status)).parentNode,
+          el("td", null, s.at ? fmtTime(s.at) : "—"),
+          el("td", null, s.detail || ""));
+        tb.append(tr);
+      }
+      t.append(tb);
+      view.append(t);
+      view.append(el("p", null,
+        "Observed events are distinguished from inferred relationships: a "
+        + "retrieval is not delivery, a guidance return is not proof the "
+        + "model followed it, and a later success is not proof the strategy "
+        + "caused it. Behavioral improvement requires a controlled benchmark "
+        + "— BEHAVIORAL IMPROVEMENT NOT YET PROVEN."));
     }
   } catch (e) { showError(e.message); }
 }
@@ -551,11 +741,15 @@ async function render() {
   document.querySelectorAll("#nav button").forEach((b) =>
     b.setAttribute("aria-current", String(b.dataset.page === state.page)));
   try {
+    // fetch system status for freshness/banner on every cycle (cheap)
+    try { state.sys = await api("system"); updateFreshness(state.sys); }
+    catch (e2) { /* status bar stays as-is on transient failure */ }
     if (state.page === "overview") await renderOverview();
     else if (state.page === "activity") { state.page = "tools"; await renderToolCalls(); }
     else if (state.page === "tools") await renderToolCalls();
     else if (state.page === "failures") await renderFailures();
     else if (state.page === "tasks") await renderTasks();
+    else if (state.page === "trace") await renderLiveTrace();
     else if (state.page === "memory") await renderMemory();
     else if (state.page === "guidance") await renderGuidance();
     else if (state.page === "system") await renderSystem();

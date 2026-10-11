@@ -135,3 +135,4 @@ codegraph.db
 
 # Local clean-install test environments
 .venv-clean-install/
+.venv-lint/

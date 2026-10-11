@@ -19,7 +19,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 from hermes_ebtto import events as ev
 
@@ -133,6 +133,12 @@ def ensure_schema(storage_path: Optional[Path] = None) -> int:
     # SQLite version).
     uri = f"file:{db_path.as_posix()}?mode=rwc"
     conn = _Connection(uri)
+    # A fresh database has no schema_version table yet; the base schema
+    # (which creates it) must run BEFORE the version can be read. Without
+    # this, ensure_schema() on a brand-new installation raised
+    # "no such table: schema_version".
+    conn.executescript(_SCHEMA_SQL)
+    conn.commit()
     current = _read_version(conn)
     for m in _migration_files():
         if int(m.stem) > current:
@@ -486,7 +492,11 @@ class Store:
                        :workspace_identifier, :profile, :model, :provider, :created_at)""",
             data,
         )
-        return task.event_id
+        # Return the id ACTUALLY STORED (task.task_id). Returning event_id
+        # — a different uuid — made every caller's dependent rows (tool
+        # calls, outcomes) reference a task row that does not exist, so
+        # tasks never joined tool_calls in any real installation.
+        return task.task_id
 
     def task_exists(self, task_id: str) -> bool:
         row = self._execute(
@@ -644,7 +654,7 @@ class Store:
             task_id=data["task_id"],
             task_fingerprint=data["task_fingerprint"],
             task_family=data["task_family"],
-            tool_calls=[ev.ToolCall(**c) for c in json_loads(data["tool_calls_json"])],
+            tool_calls=[ev.ToolCall(**c) for c in json.loads(data["tool_calls_json"])],
             outcome=data["outcome"],
             success_count=data["success_count"],
             failure_count=data["failure_count"],

@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 
 def _main(argv: Optional[List[str]] = None) -> int:

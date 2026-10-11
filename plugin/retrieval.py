@@ -20,12 +20,10 @@ All retrieval is bounded by ``max_results`` and gated on ``min_confidence``.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from hermes_ebtto import classification as clf
-from hermes_ebtto.learning import score_pattern, Strategy
+from hermes_ebtto.learning import Strategy
 
 _DEFAULT_MAX_RESULTS = 3
 _DEFAULT_MIN_CONFIDENCE = 0.80

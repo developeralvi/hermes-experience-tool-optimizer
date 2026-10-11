@@ -12,9 +12,8 @@ Provides:
 
 from __future__ import annotations
 
-import hashlib
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 
 def normalize_tool_input(args: Dict[str, Any]) -> Dict[str, Any]:

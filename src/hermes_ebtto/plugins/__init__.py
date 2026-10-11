@@ -11,17 +11,16 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-import time
 import os
-from datetime import datetime, timezone
+import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # hermes_ebtto config import (relative — works whether the package is
 # installed as ``hermes_ebtto`` or loaded standalone by the Hermes
 # capability probe, which names the module ``hermes_validate_probe_plugin``).
 from .. import config as ebtto_config
+
 
 # ``hermes_ebtto`` may not be an importable top-level package when Hermes loads
 # this directory plugin as ``hermes_plugins.<slug>`` (the loader imports
@@ -147,7 +146,7 @@ class EBTTOStore:
 
 def register(ctx):
     """Module-level register(ctx) - the Hermes plugin entry point.
-    
+
     Creates the EBTTOPlugin and registers all hooks via the public
     ctx.register_hook() API. This satisfies the Hermes plugin manifest
     contract: modules with main: hermes_ebtto.plugins MUST provide
@@ -210,7 +209,7 @@ class EBTTOPlugin:
         self.ctx = ctx
         self.mode = self.MODE_RECORD_ONLY
         self.store = None
-        self._hook_handles = []
+        self._hook_handles: List[Any] = []
         self._started = False
 
         if config is None:
@@ -380,9 +379,7 @@ class EBTTOPlugin:
 
         try:
             from hermes_ebtto import events as ev
-            from hermes_ebtto import classification as cl
 
-            task_id = kwargs.get("task_id") or kwargs.get("session_id") or f"turn-{int(time.time() * 1000)}"
             tool_name = kwargs.get("tool_name") or kwargs.get("tool_input", {}).get("name", "unknown")
             args = kwargs.get("args") or kwargs.get("tool_input", {})
 
@@ -482,7 +479,10 @@ class EBTTOPlugin:
             # still gets checked via the payload before being called success.
             success = self._is_success(status=status, result=result, tool_name=tool_name)
 
-            if self.store is not None and self._started and task_id and tool_call_id:
+            # store is prepared during register(); None-guard is fail-open by
+            # design (mypy cannot narrow the EBTTOStore wrapper).
+            store = self.store
+            if store is not None and self._started and task_id and tool_call_id:
                 outcome = ev.Outcome(
                     task_id=task_id,
                     turn_id=turn_id,
@@ -510,7 +510,10 @@ class EBTTOPlugin:
 
             # GAP-2: after persisting the outcome, evaluate whether the
             # accumulated evidence for this tool qualifies as a pattern.
-            if self.store is not None and self._started and task_id and tool_call_id:
+            # store is prepared during register(); None-guard is fail-open by
+            # design (mypy cannot narrow the EBTTOStore wrapper).
+            store = self.store
+            if store is not None and self._started and task_id and tool_call_id:
                 try:
                     self._learn_pattern(task_id=task_id, tool_name=tool_name,
                                         success=success)
@@ -798,9 +801,6 @@ class EBTTOPlugin:
             return None
 
         try:
-            from hermes_ebtto import retrieval as rt
-            from hermes_ebtto import scoring as sc
-
             from hermes_ebtto.normalization import task_fingerprint
 
             # task_family is the retrieval key: at the pre-LLM hook it is derived from
@@ -910,8 +910,9 @@ class EBTTOPlugin:
 
     def prepare_storage(self, storage_path: Optional[Path] = None):
         if self.store is None:
-            self.store = EBTTOStore(storage_path)
-            log.info("EBTTO store initialized at %s", self.store.db_path)
+            store = EBTTOStore(storage_path)
+            self.store = store
+            log.info("EBTTO store initialized at %s", store.db_path)
 
     def close(self):
         if self.store is not None:

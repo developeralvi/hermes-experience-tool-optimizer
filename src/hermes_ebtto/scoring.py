@@ -18,9 +18,9 @@ from __future__ import annotations
 # Re-export from learning to keep one canonical implementation.
 from hermes_ebtto.learning import (
     Strategy,
-    score_pattern,
     evaluate_pattern,
     rank_strategies,
+    score_pattern,
 )
 
 __all__ = [

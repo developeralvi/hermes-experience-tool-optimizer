@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 
 class Publisher:
@@ -54,7 +54,6 @@ class Publisher:
 
     def jsonl(self, path: str) -> Callable[[Dict[str, Any]], None]:
         """Return a sink that appends JSONL to *path* (best-effort)."""
-        import os
 
         def sink(event: Dict[str, Any]) -> None:
             try:
