@@ -328,20 +328,46 @@ class EBTTOPlugin:
             return None
 
         try:
+            from hermes_ebtto import events as ev
+
+            # Hermes passes its session id here; tasks are keyed by a generated
+            # uuid, so the session id can never be joined. Store the task first
+            # and link guidance to the id that was actually written — the same
+            # fix applied to the pre_tool_call path (see _on_pre_tool_call).
             task_id = kwargs.get("task_id") or kwargs.get("session_id") or ""
-            # Hermes passes the user's message; derive the task family from it so
-            # guidance is scoped to the current task rather than replayed blindly.
-            user_message = kwargs.get("user_message") or ""
-            if not isinstance(user_message, str):
-                user_message = str(user_message)
-            task_family = self._derive_task_family(user_message)
+            task_id_db: Optional[str] = None
+            if self.store is not None:
+                # Hermes passes the user's message; derive the task family from it so
+                # guidance is scoped to the current task rather than replayed blindly.
+                user_message = kwargs.get("user_message") or ""
+                if not isinstance(user_message, str):
+                    user_message = str(user_message)
+                task_family = self._derive_task_family(user_message)
+
+                task_id_db = self.store.record_task(
+                    ev.Task(
+                        task_fingerprint=f"llm_{task_family}",
+                        task_family=task_family,
+                        workspace_identifier=kwargs.get("session_id") or "unknown",
+                        model=kwargs.get("model") or "unknown",
+                        provider=kwargs.get("provider") or "unknown",
+                        sanitized_intent=user_message[:512],
+                    )
+                )
+            else:
+                user_message = kwargs.get("user_message") or ""
+                if not isinstance(user_message, str):
+                    user_message = str(user_message)
+                task_family = self._derive_task_family(user_message)
+            # never link telemetry to the raw session id: it joins nothing
+            link_id = task_id_db or ""
 
             guidance = self._retrieve_guidance_for_task(
                 task_family, {"user_message": user_message}, task_id
             )
             if not guidance:
                 self._record_retrieval_event(
-                    task_id=task_id,
+                    task_id=link_id,
                     task_fingerprint=task_family,
                     hook="pre_llm_call",
                     candidate_count=0,
@@ -355,7 +381,7 @@ class EBTTOPlugin:
             hint = (guidance.get("directive") or {}).get("hint")
             if not hint:
                 self._record_retrieval_event(
-                    task_id=task_id,
+                    task_id=link_id,
                     task_fingerprint=task_family,
                     hook="pre_llm_call",
                     candidate_count=1,
@@ -367,7 +393,7 @@ class EBTTOPlugin:
                 return None
 
             self._record_retrieval_event(
-                task_id=task_id,
+                task_id=link_id,
                 task_fingerprint=task_family,
                 hook="pre_llm_call",
                 candidate_count=1,

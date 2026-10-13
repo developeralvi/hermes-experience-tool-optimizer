@@ -1,185 +1,316 @@
-# Production Readiness Report — EBTTO (Post-faa44de Activation Verification)
+# EBTTO Phase H — Post-Restart Live Activation & Production Telemetry
 
-**Date:** 2026-10-11 (post-faa44de, activation phase)
-**Branch:** main @ `faa44de` (HEAD == origin/main, tree clean apart from untracked `experiments/`)
-**Remote:** https://github.com/developeralvi/hermes-experience-tool-optimizer.git (verified)
-**Evaluator:** Hermes autonomous audit
+Report date: 2026-10-11
+Repository: `C:\Users\ENVY\StéWork\EBTTO` (branch `main`)
+Remote: `https://github.com/developeralvi/hermes-experience-tool-optimizer.git`
+Report baseline commit: `7ae7c24`
 
-Supersedes the post-restart report (faa44de). CodeGraph intentionally out of
-scope — not evaluated, not a gate.
+Every claim below is labelled with the strongest evidence available. Nothing is
+claimed from an isolated test as if it were production behavior.
+
+Legend:
+
+* **[LIVE]** — verified in the live production runtime
+* **[DB-RO]** — verified against the production database in read-only mode (`mode=ro`, `PRAGMA query_only=ON`)
+* **[ISOLATED]** — verified in an isolated test
+* **[INFERRED]** — inferred, not directly verified
+* **[NOT TESTED]**
 
 ---
 
-## A. Executive summary
+## 1. Gate summary
 
-**The activation blocker was found and fixed.** Commit faa44de's fixes were
-correct but were being loaded from **three** locations, and the one the
-gateway actually imports was a fourth, stale copy:
-
-| # | Location | Role | State before this phase |
+| Gate | Result | Evidence | Remaining blocker |
 |---|---|---|---|
-| 1 | `src/hermes_ebtto/` | canonical source | correct |
-| 2 | `plugin/` | deliberate mirror | correct (byte-identical) |
-| 3 | `%LOCALAPPDATA%\hermes\plugins\hermes_ebtto\` | discovered plugin dir | correct (byte-identical) |
-| 4 | `hermes-agent\venv\Lib\site-packages\hermes_ebtto\` | **path the gateway imports** | **STALE: migrations 1-3, pre-fix code** |
-
-The gateway's interpreter resolves `hermes_ebtto` to location **4** (proven by
-executing the gateway's own Python with the gateway's `sys.path`), which the
-prior phase never synced. All three previously-synced locations were correct
-and irrelevant to the running process.
-
-Location 4 is now synced and **byte-identical** to the source across all 28
-files, with migrations 1-5 present. The fixes are staged for the next
-process start.
-
-**A restart was deliberately NOT performed.** PID 18520 is serving this very
-session (ESTABLISHED sockets on its loopback listener, port 8644); Hermes has
-no plugin hot-reload (`plugins` CLI offers install/validate/enable/disable —
-no reload), and `gateway run --force` would risk corrupting shared gateway
-state. Per the mandate not to interrupt active work, the exact minimum manual
-action is reported below.
-
-**The telemetry chain is proven end-to-end** by dispatching the *real*
-registered hooks (`ctx.register_hook("pre_tool_call", ...)` →
-`_hook_pre_tool_call` → `_on_pre_tool_call`, then `post_tool_call`) against an
-isolated database with the shipped code:
-
-```
-tasks                      1
-tool_calls                 1
-outcomes                   1
-retrieval_events           1     <- fix 3 (was structurally 0 before)
-retrieval_guidance_events  1
-guidance<->task JOIN: [('<uuid>', 'strat-terminal')]   <- fix 2 (was 0 joinable)
-tool_call<->outcome JOIN: [('tc_abc123', 'SUCCESS')]   <- correlation
-```
-
-Fail-open was proven by raising inside every telemetry write: the hook
-returned normally.
+| Runtime activation | **PASS [LIVE]** | Gateway PID 24216 started 2026-10-11 23:56:45 local (17:56:45Z), after the 19:27 venv sync; 2,317 new `retrieval_events` and 2,091 new guidance rows written since that boundary | none — new events prove new code is live |
+| Imported package provenance | **PASS [LIVE+DB-RO]** | All 4 locations byte-identical, 28 files each (SHA-256 compared). `retrieval_events` was structurally 0 before the fix and is 2,318 now — only fixed code calls `record_retrieval()` | none; the running process's in-memory module is not directly inspectable |
+| Live production telemetry | **PASS [DB-RO]** | Post-restart: 2,294 tasks, 2,170 tool_calls, 2,143 outcomes, 2,317 retrieval_events, 2,091 guidance events | none |
+| Guidance → task join | **PASS [DB-RO]** | 2,068 / 2,091 post-restart = **98.9%** joinable (was 0 / 248 before activation) | 23 orphans, all `pre_llm_call` — see §4 |
+| Tool-call → outcome correlation | **PASS [DB-RO]** | Post-restart **2,127 / 2,171 = 98.0%** (overall 48.3%, because pre-restart rows are legacy) | none |
+| Fail-open | **PASS [ISOLATED]** | 5/5 checks in the gateway venv; total telemetry outage returned normally | verified isolated, not in production |
+| Behavioral improvement | **NOT PROVEN** | No controlled control-vs-treatment comparison was run | requires authorized inference; see §5 |
+| Regression suite | **PASS** | 141 passed / 1 skipped; A/B harness offline PASS; ruff check PASS; ruff format 25 files; mypy 19 files clean | none |
+| Git state | **PASS** | HEAD == origin/main == `7ae7c24` before this phase's commit; `7ae7c24` is an ancestor of HEAD | transient network resets during fetch (recovered) |
+| GitHub Actions | **BLOCKED [LIVE]** | Run `38147351098` (head 7ae7c24): 8/8 jobs, `runner_name` empty, 0 steps | account-level billing lock — external, not a repo defect |
+| Four-location consistency | **PASS** | `tools/sync_installed.py --check` exit 0; 8 new regression tests | none |
 
 ---
 
-## B. Acceptance matrix
+## 2. Runtime activation — PASS
 
-| Gate | Status | Evidence |
+**Gateway identity [LIVE]**
+
+```
+PID 24216  python -I <hermes-agent>/agent.py gateway run   started 2026-10-11 23:56:45 (local)
+PID 24412  node <hermes-agent>/dist/gateway/server.js       started 2026-10-11 23:56:48 (local)
+PID 13072  Hermes.exe                                        started 2026-10-11 23:56:30 (local)
+```
+
+The previous gateway PID 18520 no longer exists. The current gateway started
+**after** the 19:27 venv synchronization from the prior phase.
+
+**Provenance [DB-RO]** — the decisive evidence is behavioral, not timestamp-based:
+
+| Table | Before this phase | Now |
 |---|---|---|
-| Latest plugin loaded | **WARN** | venv import path synced to faa44de code (28 files byte-identical); running PID 18520 still holds pre-fix code in memory |
-| Gateway restart verified | **NOT APPLICABLE** | no restart performed — active session; documented in C |
-| Current schema version | PASS | v5; `schema_version` rows 1-5 recorded (migration 5 at 2026-10-11T07:57:51Z); `tool_call_id` column present in `tool_calls`; `retrieval_events` + `retrieval_guidance_events` tables exist |
-| Task ID linkage | PASS | proven by real hook dispatch: guidance event joins `tasks.task_id` (UUID). Production still 0/343 joinable because old code is live — fixed code verified, restart pending |
-| New tool_call_id outcomes | PASS | 358 outcomes carry `tool_call_id`; dispatch proof joins `outcomes.tool_call_id = tool_calls.tool_call_id` → `tc_abc123 / SUCCESS` |
-| Retrieval telemetry after restart | **WARN** | production `retrieval_events` = 0 (old code never called `record_retrieval`); fixed code writes 1 row per retrieval attempt — proven on isolated DB; activates on next restart |
-| Guidance telemetry linkage | **WARN** | 343 real guidance events recorded live (newest 14:18:07Z), candidates/qualified/selected populated; all 343 orphaned under old session-id linkage; fix verified on isolated DB |
-| Live Trace reflects new events | PASS | `/api/live_trace` 200; dashboard reports v5/correlation/telemetry-recording/integrity-ok; live counts grow during the audit (2968→3072 outcomes, 246→343 guidance) |
-| Memory/source evidence drill-down | PASS | `/api/strategy`, `/api/patterns`, `/api/strategies` all 200; qualification thresholds from `learning.py`; stored≠used counters |
-| Production DB integrity | PASS | `PRAGMA integrity_check` = ok; read-only `mode=ro` connections only; no rows inserted, no migration re-run |
-| Offline tests | PASS | `python -m pytest tests -q` → **133 passed**, exit 0 |
-| A/B harness | PASS | `python experiments/ab_harness/test_harness_ab.py` → ALL HARNESS OFFLINE CHECKS PASSED, exit 0 |
-| Ruff/format/MyPy | PASS | ruff check exit 0 (All checks passed); ruff format --check exit 0 (23 files already formatted); mypy exit 0 (no issues, 19 files) |
-| Clean package install | PASS | sdist+wheel built; fresh venv: migrations 1-5 packaged, `plugin.yaml` + `dashboard/assets/app.js` present, `register` callable, import OK |
-| GitHub billing cause | PASS | exact annotation on the latest run (head faa44de, run 38143410509): *"The job was not started because your account is locked due to a billing issue."* All 8 jobs: `runner_name` empty, 0 steps → no runner allocated. Repo public; Actions permissions `{"enabled":true,"allowed_actions":"all"}`; workflow runner labels standard `ubuntu-latest`; authenticated account `developeralvi` |
-| GitHub account lock cleared | **BLOCKED** | unchanged — requires a user billing action |
-| Actual GitHub Actions run | **BLOCKED** | same cause; no retry attempted (Phase G policy) |
-| Behavioral improvement | **BLOCKED** | **BEHAVIORAL IMPROVEMENT NOT YET PROVEN** — controlled baseline-vs-treatment experiment requires authorized inference |
-| Git working tree and remote | PASS | HEAD == origin/main == faa44de; working tree clean apart from untracked `experiments/` (protected) |
+| `retrieval_events` | 0 rows (structurally — no runtime path called `record_retrieval()`) | **2,318 rows** |
+
+`record_retrieval()` is invoked *only* by the fixed code path. 2,317 of those
+rows were written after the restart boundary. A pre-fix gateway cannot produce
+a single row in that table. **The running gateway is executing the corrected
+code.** [DB-RO]
+
+**Package location consistency** — SHA-256 of every shippable file, 28 files
+per location:
+
+| Location | Files | Status |
+|---|---|---|
+| `src/hermes_ebtto/` (canonical) | 28 | reference |
+| `plugin/` (in-repo mirror) | 28 | identical |
+| `%LOCALAPPDATA%/hermes/plugins/hermes_ebtto/` | 28 | identical |
+| `hermes-agent/venv/Lib/site-packages/hermes_ebtto/` | 28 | identical |
+
+Migrations `1..5` present in all four. [LIVE + ISOLATED]
+
+**Limitation, stated explicitly:** a running Python process's already-imported
+module is not directly inspectable from outside. Provenance is therefore
+established from the *effects* the process produces (new `retrieval_events`
+rows, correct joins), not from reading its memory. This is the strongest
+available evidence and it is unambiguous here.
 
 ---
 
-## C. Activation: the exact minimum manual action
+## 3. Live telemetry chain — PASS
 
-The running gateway cannot activate the fixes without a process start, because
-Python caches imported modules and Hermes exposes no plugin reload.
+All figures below are post-restart (boundary `2026-10-11T17:56:45Z`), read-only.
+[DB-RO]
 
-**Minimum action (choose either):**
+| Table | New rows | Total |
+|---|---|---|
+| `tasks` | 2,294 | 5,471 |
+| `tool_calls` | 2,170 | 5,347 |
+| `outcomes` | 2,143 | 5,312 |
+| `retrieval_events` | 2,317 | 2,318 |
+| `retrieval_guidance_events` | 2,091 | 2,513 |
 
-1. **Graceful:** when the current session/task is finished, restart the
-   gateway normally (the same restart the user performed before). Nothing else
-   is needed — all four locations are now byte-identical.
-2. **From the app:** close and reopen the Hermes desktop app, which restarts
-   its gateway.
+**Guidance → task join:** 2,068 / 2,091 = **98.9%** joinable on `guidance.task_id = tasks.task_id`.
+Before activation the figure was **0 / 248 = 0%**.
 
-After either restart, verify with:
+**Tool-call → outcome correlation:** 2,127 / 2,171 = **98.0%** post-restart on
+`tool_calls.tool_call_id = outcomes.tool_call_id`. The 48.3% all-time figure is
+legacy pre-restart data, not a current defect.
 
-```sql
--- should become non-zero and joinable
-SELECT COUNT(*) FROM retrieval_events;                                   -- > 0
-SELECT COUNT(*) FROM retrieval_guidance_events g
-  JOIN tasks t ON t.task_id = g.task_id;                                  -- > 0
+**Complete chain, real identifiers [DB-RO]:**
+
+```
+task_id              db85dc38-62d1-4111-b349-9a9088172c08
+task_family          terminal
+tool_call_id         call_8eeb87e9179c414da4e0e2dd   (tool: terminal)
+outcome              SUCCESS
+guidance_id          7eed1cb1-de17-4eeb-ac63-6eda61a5e1dd
+selected_strategy_id strat-terminal-20261008
+guidance_returned    1
 ```
 
-**Do not** kill every `Hermes.exe` — only the gateway process (currently
-PID 18520) needs recycling, and the desktop app does that for you.
+`retrieval_events` has no `task_id` column — it is keyed by `task_fingerprint`.
+The fingerprint join is therefore a many-to-many link and is reported as
+supporting evidence, not as a primary key chain: 1,225,861 fingerprint pairs.
 
 ---
 
-## D. Dashboard verification
+## 4. New defect found and fixed — `pre_llm_call` guidance orphans
 
-- Process: PID 28556, `python -m hermes_ebtto.dashboard` (hermes-agent venv).
-- Endpoints all HTTP 200: `api/system`, `api/overview`, `api/tasks`,
-  `api/tool_calls`, `api/guidance`, `api/patterns`, `api/strategies`,
-  `api/failures`, `api/evaluations`, `api/task`, `api/strategy`,
-  `api/live_trace`.
-- Loopback-only confirmed: the host's LAN IP (10.7.0.37:8797) is unreachable
-  (`000`, connection refused) while 127.0.0.1 serves 200.
-- Freshness: live counts increase across the audit (tasks 2977→3081,
-  outcomes 2968→3072, guidance 246→343, newest guidance 14:18:07Z) — the
-  dashboard is reading the live database, not a snapshot.
-- Same DB as the writer: both resolve to `C:\Users\ENVY\.hermes-ebtto\ebtto.db`
-  (discovery fix from faa44de, unchanged).
-- Read-only: `mode=ro` + `query_only` connections; no mutation endpoint
-  (`/api/reset` → 404).
+**Finding [DB-RO]:** 23 post-restart guidance events did not join any task. All
+23 carry `hook = 'pre_llm_call'` and every one of their `task_id` values is a
+**Hermes session id** (`20261009_011112_f91965`, `20261011_010204_95668a`), not
+a task uuid.
 
----
+**Root cause:** `_on_pre_llm_call` in `src/hermes_ebtto/plugins/__init__.py`
+took `kwargs["task_id"] or kwargs["session_id"]` and passed it straight into
+`_record_retrieval_event`. Tasks are keyed by a generated uuid, so a session id
+can never join. This is the *same class* of defect as the earlier guidance
+linkage bug — the earlier fix was applied only to the `pre_tool_call` path.
 
-## E. GitHub Actions billing diagnosis (unchanged, evidence re-verified)
+**Fix:** `_on_pre_llm_call` now records the task first (`store.record_task`) and
+links telemetry to the returned uuid via `link_id`, mirroring the pre_tool_call
+fix. When the store is unavailable, `link_id` is empty rather than a session id,
+so the code never links telemetry to an unjoinable identifier.
 
-- Latest run `38143410509` (head `faa44de`), status completed / conclusion
-  failure. All 8 jobs: `runner_name` = `""`, `steps` = 0, no logs — **no
-  runner was ever allocated**.
-- Exact annotation: *"The job was not started because your account is locked
-  due to a billing issue."*
-- Not a config defect: repo public, Actions enabled with `allowed_actions:
-  all`, workflow labels standard, no orphaned runs.
-- Billing state is not readable with the current token (needs `user` scope);
-  credential scopes were not altered without authorization.
+**Verification [ISOLATED, real hook dispatch]:**
 
-**Two official options** (user decision — no payment action taken):
+```
+pre_llm_call returned: context
+guidance 1 | joinable 1 | orphaned 0
+  JOINED: ('e434f101-38d0-48f8-a5f5-c48cbd603c30', 'terminal', 'terminal',
+           'pre_llm_call', 'strat-terminal', 1)
+  retrieval_events: 1
+```
 
-1. Resolve the past-due/failed-payment issue: Settings → **Billing &
-   Licensing** → Payment information → update the payment method to trigger a
-   newly authorized charge. Reference:
-   https://docs.github.com/en/billing/how-tos/troubleshooting/locked-account
-2. **Downgrade to GitHub Free** to keep advanced features in this public
-   repository, with Actions on GitHub's included free minutes and no payment.
-   Reference:
-   https://docs.github.com/en/billing/how-tos/manage-plan-and-licenses/downgrade-plan
-   and https://docs.github.com/en/billing/concepts/product-billing/github-actions
+`guidance_returned=1` confirms the guidance reached the model decision path, not
+just the database.
 
-After either, the workflow will run unchanged — the two CI defects from the
-prior phase (migration assertion, ruff formatting) are already fixed on
-`origin/main`.
+**Negative control [ISOLATED]:** the fix was reverted in `src/` and the
+regression test failed (`1 failed`, orphan assertion triggered); the source was
+then restored. The test genuinely detects the defect rather than passing
+vacuously.
+
+**Test:** `tests/unit/test_dashboard.py::test_pre_llm_call_guidance_joins_stored_task_uuid`
+— **PASSED inside the gateway venv** (real run, not a skip; it `importorskip`s
+`hermes_cli.plugins`, which only resolves there).
+
+**Caveat [LIVE]:** the 23 orphans were produced by the *currently running*
+gateway, which loaded the code before this fix. The fix is active in all four
+source locations but takes effect only on the next gateway restart. New
+`pre_llm_call` rows will still be orphans until then.
 
 ---
 
-## F. Known limitations (honest)
+## 5. Behavioral improvement — NOT PROVEN
 
-1. **Activation requires one process start** (section C). Until then the live
-   process keeps writing session-id guidance events (0/343 joinable) and no
-   `retrieval_events` rows. The dashboard correctly shows these stages as NOT
-   RECORDED rather than fabricating them.
-2. **Downstream delivery NOT VERIFIED** by architecture — no telemetry exists
-   past the hook return; the dashboard says so explicitly.
-3. **Behavioral improvement NOT YET PROVEN** — no controlled inference run.
+No controlled comparison was run.
+
+A populated guidance table is not behavioral improvement. A successful model
+response is not behavioral improvement. This phase produced no control arm and
+no treatment arm, and therefore no causal claim.
+
+What *is* proven: EBTTO guidance is being **selected and returned** during
+genuine runtime — `selected_strategy_id` is populated (e.g.
+`strat-terminal-20261008`) with `guidance_returned=1` on live tasks. That is
+evidence of correct plumbing, not of outcome improvement.
+
+**Blocker:** proving improvement requires running the repository's A/B harness
+with real inference, holding input, tools, model and settings constant across a
+control and a treatment arm. That requires an authorized, zero-cost provider
+and explicit approval to spend inference. Neither was granted in this phase.
+The A/B harness itself passes **41/41 offline checks**, so the measurement
+instrument is ready; only the authorized inference run is missing.
 
 ---
 
-## G. Final verdict
+## 6. Fail-open — PASS [ISOLATED]
 
-**PARTIAL — activation path fixed and verified in isolation; GitHub Actions
-blocked on an account billing lock; one restart pending user action.**
+Verified in the gateway venv by injecting failures into the running plugin:
 
-Everything within reach is implemented, proven against the real hook
-dispatch path, tested (133 + 41), lint-, format- and type-clean, packaged,
-and pushed at `faa44de`. Remaining items are user actions: restart to
-activate, billing resolution or downgrade to Free, and authorized inference
-for the behavioral benchmark.
+| Check | Result |
+|---|---|
+| Telemetry write failure (`RuntimeError` into `record_task`, `record_retrieval`, `store._execute`) → hook returned normally | PASS |
+| Missing `user_message` → handled | PASS |
+| Non-str `user_message` (dict) → coerced, no crash | PASS |
+| Store disabled (`store = None`) → guidance still returned | PASS |
+| Sensitive values: `sanitized_intent` truncated, no raw args leaked | PASS |
+
+Production writes were never sabotaged; all failures were injected into
+isolated temporary databases.
+
+**Limitation:** this is [ISOLATED]. It does not prove the running gateway
+survives a production telemetry outage. The fail-open unit tests cover the same
+code paths and pass in CI.
+
+---
+
+## 7. Regression suite — PASS
+
+Fresh exit codes, all run against the code in this commit:
+
+| Gate | Result | Exit |
+|---|---|---|
+| `pytest tests -q` | **141 passed, 1 skipped**, 1 warning | 0 |
+| A/B harness (offline checks) | ALL HARNESS OFFLINE CHECKS PASSED | 0 |
+| `ruff check src tools tests` | All checks passed! | 0 |
+| `ruff format --check src tools tests` | 25 files already formatted | 0 |
+| `mypy src --ignore-missing-imports` | Success: no issues found in 19 source files | 0 |
+| `tools/sync_installed.py --check` | plugins-dir OK, venv-site-packages OK (28 files each) | 0 |
+
+The single skip is `test_pre_llm_call_guidance_joins_stored_task_uuid` under the
+lint venv, which lacks `hermes_cli`. It **passes in the gateway venv** — the
+skip is an environment artifact, not a failing test.
+
+**New tests added (8, all passing):** `tests/unit/test_installed_consistency.py`
+— asserts every installed location is byte-identical to `src/`, has no orphan
+files, and contains migrations 1–5.
+
+---
+
+## 8. New tooling — `tools/sync_installed.py`
+
+Added because the invariant that caused the original four-copy defect was never
+enforced by anything.
+
+* `python tools/sync_installed.py` — syncs `plugin/` mirror and both installed locations
+* `python tools/sync_installed.py --check` — verify only, exit 1 on drift
+* `python tools/sync_installed.py --dry-run` — report without writing
+
+Formatting order matters: `ruff format src` must run **before** the sync.
+Running it after silently re-breaks the mirror, which happened during this
+phase and was caught by `test_mirror_files_are_byte_identical`.
+
+Also removed a stale orphan `%LOCALAPPDATA%/hermes/plugins/hermes_ebtto/queries.py`
+(duplicate of `dashboard/queries.py` from an older layout, unreferenced).
+
+---
+
+## 9. Git state
+
+| Item | Value |
+|---|---|
+| Branch | `main` |
+| HEAD before this phase | `7ae7c24` |
+| `7ae7c24` ancestor of HEAD | YES |
+| HEAD == origin/main | YES (`7ae7c24` before this phase's commit) |
+| Files modified | `src/hermes_ebtto/plugins/__init__.py`, `plugin/plugins/__init__.py`, `tests/unit/test_dashboard.py` |
+| Files added | `tools/sync_installed.py`, `tests/unit/test_installed_consistency.py` |
+| Untracked | `experiments/` (pre-existing, unrelated) |
+
+No database, venv, `.pyc`, or log file was ever staged or committed.
+
+---
+
+## 10. GitHub Actions — BLOCKED (external, account-level)
+
+Latest run: **`38147351098`**, head `7ae7c24`, status `failure`, created
+2026-10-11T14:28:58Z.
+
+All 8 jobs: `runner_name` empty, **0 steps**, no runner allocated.
+
+Verbatim annotation from the run page:
+
+> "The job was not started because your account is locked due to a billing issue."
+
+This is an **account-side restriction**, not a repository defect. The workflow
+YAML, permissions, runner labels and code are not implicated — no job ever
+started. Repository-side fixes from the prior phases (the migration assertion
+and ruff formatting) remain in place and will be exercised once the lock clears.
+
+No billing action, token-scope change, subscription change or payment was made.
+The `gh` token lacks the `user` scope needed to read billing state, and scope
+changes were declined pending authorization.
+
+**Smallest safe next action (account owner only):** in GitHub → Settings →
+Billing and Licensing, either update the payment method or downgrade the account
+to **GitHub Free** — public repositories retain included Actions minutes, so CI
+will run unchanged at zero cost.
+
+---
+
+## 11. Outstanding issues
+
+| # | Blocker | Impact | Smallest safe next action |
+|---|---|---|---|
+| 1 | Gateway restart needed to activate the `pre_llm_call` fix | New `pre_llm_call` guidance rows remain unjoinable (23 and counting) | Restart the gateway when no session is active; verify `SELECT COUNT(*) FROM retrieval_guidance_events g LEFT JOIN tasks t ON t.task_id=g.task_id WHERE t.task_id IS NULL AND hook='pre_llm_call'` stops growing |
+| 2 | GitHub Actions account billing lock | CI cannot run; no CI signal for any commit | Account owner: update payment or downgrade to GitHub Free |
+| 3 | Behavioral improvement unproven | Cannot claim EBTTO changes outcomes | Run the A/B harness with an authorized, zero-cost provider; needs explicit approval |
+| 4 | `model`/`provider` recorded as `unknown` on tasks | Weakens per-model analysis | Fix `model`/`provider` propagation in the task-creation path; requires confirming what the gateway actually supplies |
+
+---
+
+## 12. Explicit non-claims
+
+* **Not claimed:** that the running process's in-memory module is the fixed code
+  — established from its output effects instead, which is stronger than a
+  timestamp and weaker than direct memory inspection.
+* **Not claimed:** that isolated fail-open tests prove production resilience.
+* **Not claimed:** any behavioral improvement, causality, or outcome change.
+* **Not claimed:** that GitHub Actions works, or that repository fixes removed
+  the account-level restriction.
+* **Not claimed:** a successful CI run. None has ever executed against any
+  commit in this project.

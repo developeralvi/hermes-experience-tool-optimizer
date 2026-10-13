@@ -12,6 +12,11 @@ from pathlib import Path
 
 import pytest
 
+
+class _Man:
+    pass
+
+
 from hermes_ebtto.dashboard import queries, server
 from hermes_ebtto.storage import Store
 
@@ -1635,3 +1640,96 @@ def test_record_retrieval_persists_attempt(tmp_path):
     assert len(rows) == 1
     assert rows[0][0] == rid
     assert rows[0][1] == 0  # "ran, matched nothing" is distinguishable
+
+
+def test_pre_llm_call_guidance_joins_stored_task_uuid(tmp_path, monkeypatch):
+    """pre_llm_call guidance must link to the stored task uuid, not the session id.
+
+    Regression: the pre_llm_call path recorded guidance against the raw Hermes
+    session id. Tasks are keyed by generated uuids, so every one of those rows
+    was orphaned — 5/33 post-restart events were unjoinable, all from this hook.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    # The plugin imports hermes_cli.plugins, which only resolves inside the
+    # Hermes venv. Skip rather than fail on a bare repo checkout.
+    pytest.importorskip("hermes_cli.plugins", reason="requires the Hermes agent venv")
+
+    from hermes_ebtto.plugins import EBTTOPlugin
+
+    class _Ctx:
+        def __init__(self):
+            self.registered = {}
+
+        def register_hook(self, name, fn):
+            self.registered[name] = fn
+            return object()
+
+        def get_config(self, key, default=None):
+            return default
+
+    plugin = EBTTOPlugin(_Man(), _Ctx(), config={"mode": "shadow"})
+    plugin.prepare_storage(tmp_path / "store")
+    plugin.register()
+
+    # a validated pattern in the "terminal" family so guidance is selectable
+    plugin.store.store.record_pattern(
+        {
+            "pattern_id": "p1",
+            "strategy_id": "strat-terminal",
+            "strategy_name": "terminal bp",
+            "tool_name": "terminal",
+            "success_rate": 0.92,
+            "evidence_count": 6,
+            "status": "validated",
+            "task_family": "terminal",
+            "confidence": 0.9,
+        }
+    )
+    plugin.store.store.record_strategy(
+        {
+            "strategy_id": "strat-terminal",
+            "strategy_name": "terminal bp",
+            "task_family": "terminal",
+            "status": "validated",
+            "success_rate": 0.92,
+            "evidence_count": 6,
+            "confidence": 0.9,
+        }
+    )
+
+    session_id = "20261011_010204_95668a"
+    result = plugin.ctx.registered["pre_llm_call"](
+        task_id=session_id,
+        session_id=session_id,
+        user_message="run a terminal command for me",
+        model="m",
+        provider="pv",
+    )
+
+    # guidance actually reached the model decision path
+    assert result and "context" in result
+
+    con = sqlite3.connect(str(tmp_path / "store" / "ebtto.db"))
+    total = con.execute("SELECT COUNT(*) FROM retrieval_guidance_events").fetchone()[0]
+    joined = con.execute(
+        "SELECT COUNT(*) FROM retrieval_guidance_events g JOIN tasks t ON t.task_id = g.task_id"
+    ).fetchone()[0]
+    orphans = con.execute(
+        """SELECT COUNT(*) FROM retrieval_guidance_events g
+           LEFT JOIN tasks t ON t.task_id = g.task_id WHERE t.task_id IS NULL"""
+    ).fetchone()[0]
+    linked = con.execute(
+        "SELECT DISTINCT g.task_id FROM retrieval_guidance_events g JOIN tasks t ON t.task_id = g.task_id"
+    ).fetchall()
+    con.close()
+
+    assert total >= 1, "no guidance event recorded"
+    assert orphans == 0, (
+        f"{orphans} guidance event(s) unjoinable — session id used instead of task uuid"
+    )
+    assert joined == total, f"only {joined}/{total} guidance events join a stored task"
+    # the linked id must be a generated uuid, never the session id
+    assert all(len(t[0]) == 36 and t[0] != session_id for t in linked), (
+        f"guidance linked to a non-uuid identifier: {linked}"
+    )
