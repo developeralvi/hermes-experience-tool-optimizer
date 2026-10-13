@@ -159,15 +159,23 @@ jobs:
       - name: Secret scan
         run: |
           set -e
+          # git grep defaults to BASIC regex, where the {20,} quantifier is
+          # literal text — every token pattern below silently matched nothing.
+          # -E is required for the scanner to detect real credentials at all.
           patterns=(
             -e 'sk-[A-Za-z0-9]{20,}'
             -e 'xox[baprs]-[A-Za-z0-9-]{10,}'
             -e 'AKIA[0-9A-Z]{16}'
             -e 'gho_[A-Za-z0-9]{20,}'
             -e 'ghp_[A-Za-z0-9]{20,}'
-            -e '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'
+            -e 'BEGIN (RSA|EC|OPENSSH|DSA) PRIVATE KEY'
           )
-          if git grep -l "${patterns[@]}" -- '*.py' '*.yaml' '*.yml' '*.toml' '*.cfg' '*.ini' '*.json' '*.sql' '*.md'; then
+          # The pathspec must exclude this workflow itself: it contains the
+          # private-key pattern as a literal string, so scanning .github/** made
+          # the job match its own definition and fail on every run.
+          pathspec=( '*.py' '*.yaml' '*.yml' '*.toml' '*.cfg' '*.ini' '*.json' '*.sql' '*.md'
+                     ':(exclude).github/workflows/*' )
+          if git grep -l -E "${patterns[@]}" -- "${pathspec[@]}"; then
             echo "::error::Secret-like strings found in tracked files"
             exit 1
           fi
